@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Administración · Open POS</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script>
+      function loginApp() {
+        return {
+          pin: '',
+          error: '',
+          busy: false,
+          press: function (d) {
+            if (this.pin.length < 6) this.pin += d;
+            this.error = '';
+          },
+          back: function () { this.pin = this.pin.slice(0, -1); },
+          submit: async function () {
+            if (this.pin.length < 4 || this.busy) return;
+            this.busy = true;
+            try {
+              var res = await fetch('/api/admin/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pin: this.pin })
+              });
+              if (!res.ok) {
+                this.error = (await res.text()) || 'No se pudo iniciar sesión';
+                this.pin = '';
+                return;
+              }
+              var next = new URLSearchParams(location.search).get('next') || '';
+              location.href = next.indexOf('/admin') === 0 && next.indexOf('//') !== 0 ? next : '/admin';
+            } catch (e) {
+              this.error = 'No se pudo conectar con el servidor';
+            } finally {
+              this.busy = false;
+            }
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+  </head>
+  <body
+    class="bg-slate-900 min-h-screen flex items-center justify-center p-4 font-sans antialiased"
+    x-data="loginApp()"
+    @keydown.window="if (/^[0-9]$/.test($event.key)) press($event.key); else if ($event.key === 'Backspace') back(); else if ($event.key === 'Enter') submit();"
+  >
+    <div class="bg-white rounded-3xl shadow-2xl w-full max-w-xs p-6 text-center">
+      <p class="text-3xl">⚙️</p>
+      <h1 class="text-lg font-black text-gray-900 mt-1">Administración</h1>
+      <p class="text-xs text-gray-500">Ingresa tu PIN de administrador</p>
+
+      <div class="flex justify-center gap-2 my-5 h-4">
+        <template x-for="i in 6" :key="i">
+          <span
+            class="w-3.5 h-3.5 rounded-full border-2 transition"
+            :class="i <= pin.length ? 'bg-slate-900 border-slate-900' : (i <= 4 ? 'border-gray-300' : 'border-gray-200 border-dashed')"
+          ></span>
+        </template>
+      </div>
+
+      <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600 -mt-2 mb-3"></p>
+
+      <div class="grid grid-cols-3 gap-2">
+        <template x-for="d in ['1','2','3','4','5','6','7','8','9']" :key="d">
+          <button @click="press(d)" class="h-14 rounded-2xl bg-gray-100 hover:bg-gray-200 active:bg-gray-300 text-xl font-black text-gray-900" x-text="d"></button>
+        </template>
+        <button @click="back()" class="h-14 rounded-2xl bg-gray-50 hover:bg-gray-100 text-lg text-gray-500">⌫</button>
+        <button @click="press('0')" class="h-14 rounded-2xl bg-gray-100 hover:bg-gray-200 active:bg-gray-300 text-xl font-black text-gray-900">0</button>
+        <button
+          @click="submit()"
+          :disabled="pin.length < 4 || busy"
+          class="h-14 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white text-lg font-black disabled:opacity-40"
+        >
+          →
+        </button>
+      </div>
+
+      <a href="/" class="block mt-5 text-xs text-gray-400 hover:text-gray-700">← Volver al POS</a>
+    </div>
+  </body>
+</html>

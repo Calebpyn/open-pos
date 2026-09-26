@@ -1,0 +1,18 @@
+# Datos del negocio: nunca al repositorio
+pos.db
+pos.db-*
+respaldos/
+backups/
+
+# Compilados
+/open-pos
+/bin/
+*.test
+
+.DS_Store
+
+# Instaladores
+/dist/
+
+# Configuración local del editor/agente
+.claude/

@@ -1,0 +1,1331 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Open POS - Cafetería</title>
+    <!-- Librerías servidas localmente: el POS debe funcionar sin internet -->
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/vendor/htmx-1.9.10.min.js"></script>
+    <script src="/static/js/toast.js"></script>
+    <script src="/static/js/floor.js"></script>
+    <script>
+      // Terminal que usa el POS: la compu central o una terminal de mesero
+      // (iPad/teléfono) con la persona que entró con su PIN.
+      var TERMINAL = {{.Terminal}};
+      function terminalLogout() {
+        fetch('/api/terminal/logout', { method: 'POST' }).finally(function () { location.reload(); });
+      }
+      function pinPad() {
+        return {
+          pin: '', error: '', busy: false,
+          press: function (d) { if (this.pin.length < 6) this.pin += d; this.error = ''; },
+          back: function () { this.pin = this.pin.slice(0, -1); },
+          submit: async function () {
+            if (this.pin.length < 4 || this.busy) return;
+            this.busy = true;
+            try {
+              var res = await fetch('/api/terminal/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pin: this.pin }) });
+              if (!res.ok) { this.error = (await res.text()) || 'PIN incorrecto'; this.pin = ''; return; }
+              location.reload();
+            } catch (e) {
+              this.error = 'No se pudo conectar con el servidor';
+            } finally {
+              this.busy = false;
+            }
+          }
+        };
+      }
+
+      // Menú como árbol: se entra categoría por categoría hasta el producto,
+      // con la ruta arriba para regresar. El buscador salta directo al producto.
+      function menuBrowser() {
+        function norm(t) { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+        return {
+          tree: [],
+          path: [], // ids de las categorías abiertas, de la raíz hacia abajo
+          q: '',
+          loaded: false,
+          failed: false,
+          start: function () {
+            var self = this;
+            this.load();
+            setInterval(function () { if (!document.hidden) self.load(); }, 60000);
+            document.addEventListener('visibilitychange', function () { if (!document.hidden) self.load(); });
+          },
+          load: async function () {
+            try {
+              var res = await fetch('/api/menu/tree');
+              if (!res.ok) throw new Error();
+              this.tree = (await res.json()).categories;
+              this.failed = false;
+            } catch (e) {
+              this.failed = true;
+            }
+            this.loaded = true;
+            // Si una categoría abierta desapareció (archivada), se regresa hasta donde exista.
+            var level = this.tree, keep = [];
+            for (var i = 0; i < this.path.length; i++) {
+              var c = level.find(function (x) { return x.id === this.path[i]; }, this);
+              if (!c) break;
+              keep.push(c.id);
+              level = c.children;
+            }
+            if (keep.length !== this.path.length) this.path = keep;
+          },
+          get crumbs() {
+            var level = this.tree, out = [];
+            this.path.forEach(function (id) {
+              var c = level.find(function (x) { return x.id === id; });
+              if (c) { out.push(c); level = c.children; }
+            });
+            return out;
+          },
+          get node() {
+            var c = this.crumbs;
+            return c.length ? c[c.length - 1] : { children: this.tree, products: [] };
+          },
+          open: function (c) { this.path = this.path.concat([c.id]); this.$refs.scroller.scrollTop = 0; },
+          back: function () { this.path = this.path.slice(0, -1); },
+          goTo: function (depth) { this.path = this.path.slice(0, depth); this.q = ''; },
+          count: function (c) {
+            return c.products.length + c.children.reduce(function (n, ch) { return n + this.count(ch); }.bind(this), 0);
+          },
+          get results() {
+            var q = norm(this.q.trim());
+            if (!q) return [];
+            var out = [];
+            // Coincide el nombre del producto o el de alguna de sus categorías
+            // ("cafe" trae todo lo de "Con café").
+            (function walk(cats, trail, inMatch) {
+              cats.forEach(function (c) {
+                var t = trail.concat([c.name]);
+                var catMatch = inMatch || norm(c.name).indexOf(q) !== -1;
+                c.products.forEach(function (p) {
+                  if (catMatch || norm(p.name).indexOf(q) !== -1) out.push(Object.assign({ where: t.join(' › '), color: c.color }, p));
+                });
+                walk(c.children, t, catMatch);
+              });
+            })(this.tree, [], false);
+            return out.slice(0, 40);
+          },
+          pick: function (p) {
+            if (!p.available) return;
+            // pickProduct vive en el componente de la página (abre los modificadores si hay).
+            this.pickProduct({ id: p.id, name: p.name, price: p.price });
+          },
+        };
+      }
+
+      // Selector de mesas: plano del salón (como se acomodó en Admin → Mesas)
+      // o lista. La vista y la zona se recuerdan en cada dispositivo.
+      function floorPicker() {
+        function saved(k, def) { try { return localStorage.getItem(k) || def; } catch (e) { return def; } }
+        function save(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+        return {
+          zones: [],
+          loaded: false,
+          failed: false,
+          view: saved('opos.pos.tablesView', 'plan'),
+          zone: saved('opos.pos.zone', ''),
+          width: 0,
+          start: function () {
+            var self = this;
+            this.load();
+            setInterval(function () { if (!document.hidden) self.load(); }, 5000);
+            window.addEventListener('tables-reload', function () { self.load(); });
+            document.addEventListener('visibilitychange', function () { if (!document.hidden) self.load(); });
+            new ResizeObserver(function (entries) { self.width = entries[0].contentRect.width; }).observe(this.$refs.box);
+          },
+          load: async function () {
+            try {
+              var res = await fetch('/api/tables/floor');
+              if (!res.ok) throw new Error();
+              this.zones = (await res.json()).zones;
+              this.failed = false;
+            } catch (e) {
+              this.failed = true;
+            }
+            this.loaded = true;
+            if (!this.current && this.zones.length) this.zone = this.zones[0].name;
+          },
+          setView: function (v) { this.view = v; save('opos.pos.tablesView', v); },
+          setZone: function (z) { this.zone = z; save('opos.pos.zone', z); },
+          get current() {
+            var z = this.zone;
+            return this.zones.find(function (x) { return x.name === z; }) || null;
+          },
+          get plan() {
+            var z = this.current;
+            if (!z) return null;
+            var b = Floor.bounds(z.tables.concat(z.items));
+            var cell = Floor.cellFor(this.width || 300, b.cols, 14, 72);
+            return { b: b, cell: cell, style: 'width:' + b.cols * cell + 'px;height:' + b.rows * cell + 'px' };
+          },
+          count: function (status) {
+            var n = 0;
+            this.zones.forEach(function (z) { z.tables.forEach(function (t) { if (t.status === status) n++; }); });
+            return n;
+          },
+          pick: function (t) {
+            window.dispatchEvent(new CustomEvent('pick-table', { detail: { id: t.id, name: t.name, status: t.status } }));
+          },
+          tableStyle: function (t) {
+            var p = this.plan;
+            return Floor.box(t, p.cell, p.b, 3) + ';font-size:' + Floor.fontFor(t, p.cell, 22) + 'px';
+          },
+          itemStyle: function (it) {
+            var p = this.plan;
+            return Floor.box(it, p.cell, p.b, it.kind === 'WALL' ? 0 : 3) + ';font-size:' + Floor.fontFor(it, p.cell, 13) + 'px';
+          },
+          // Tiempo y consumo solo si la mesa es lo bastante grande para leerlos.
+          roomy: function (t) { return this.plan && Math.min(t.w, t.h) * this.plan.cell >= 64; },
+          money: function (n) { return '$' + Number(n).toFixed(2); },
+          minutes: Floor.minutes,
+        };
+      }
+
+      // Las tarjetas de Expo se vuelven a dibujar cada pocos segundos, así que
+      // el modal vive fuera de la cuadrícula y se abre con un evento.
+      function openCloseOrder(btn) {
+        var d = btn.dataset;
+        window.dispatchEvent(new CustomEvent('close-order', { detail: {
+          id: Number(d.orderId), title: d.title, sent: Number(d.sent),
+          delivered: Number(d.delivered), unpaid: d.unpaid, hasBills: d.hasBills === 'true'
+        } }));
+      }
+
+      // Tarjetas de Expo expandidas en esta terminal. Se guardan porque la
+      // cuadrícula se vuelve a dibujar cada pocos segundos.
+      var expoExpanded = new Set();
+      try {
+        expoExpanded = new Set(JSON.parse(sessionStorage.getItem('open-pos:expo-expanded') || '[]'));
+      } catch (e) {}
+
+      function toggleExpoCard(btn) {
+        var card = btn.closest('.expo-card');
+        var id = card.dataset.orderId;
+        if (card.classList.toggle('expanded')) expoExpanded.add(id);
+        else expoExpanded.delete(id);
+        try {
+          sessionStorage.setItem('open-pos:expo-expanded', JSON.stringify(Array.from(expoExpanded)));
+        } catch (e) {}
+      }
+
+      // Mosaico: las tarjetas van en columnas de igual ancho y cada una entra
+      // en la columna más corta, así suben a llenar el hueco en vez de alinearse
+      // por filas. Recorriendo en orden, la más vieja queda arriba a la izquierda.
+      var EXPO_CARD_MIN = 320;
+      function layoutExpo() {
+        var wrap = document.querySelector('#expo-grid .expo-cards');
+        if (!wrap) return;
+        var width = wrap.clientWidth;
+        if (!width) return; // oculta (otra pestaña): se acomoda al mostrarse
+        var cards = wrap._cards || Array.prototype.slice.call(wrap.querySelectorAll('.expo-card'));
+        wrap._cards = cards;
+        var n = Math.max(1, Math.min(4, Math.floor((width + 16) / (EXPO_CARD_MIN + 16))));
+        if (wrap._cols === n && wrap.children.length === n && wrap.firstElementChild.classList.contains('expo-col')) {
+          // Ya acomodadas con este número de columnas.
+          return;
+        }
+        var cols = [];
+        for (var i = 0; i < n; i++) {
+          var col = document.createElement('div');
+          col.className = 'expo-col flex-1 min-w-0 flex flex-col gap-4';
+          cols.push(col);
+        }
+        wrap.replaceChildren.apply(wrap, cols);
+        cards.forEach(function (card) {
+          var shortest = cols.reduce(function (a, b) { return b.offsetHeight < a.offsetHeight ? b : a; });
+          shortest.appendChild(card);
+        });
+        wrap._cols = n;
+      }
+
+      // Al refrescar, el contenido se reemplaza: se conserva el scroll.
+      var expoScroll = 0;
+      document.addEventListener('htmx:beforeSwap', function (e) {
+        if (e.target.id === 'expo-grid') expoScroll = e.target.scrollTop;
+      });
+      document.addEventListener('htmx:afterSwap', function (e) {
+        if (e.target.id !== 'expo-grid') return;
+        e.target.querySelectorAll('.expo-card').forEach(function (card) {
+          if (expoExpanded.has(card.dataset.orderId)) card.classList.add('expanded');
+        });
+        layoutExpo();
+        e.target.scrollTop = expoScroll;
+      });
+      document.addEventListener('DOMContentLoaded', function () {
+        var grid = document.getElementById('expo-grid');
+        if (!grid || !window.ResizeObserver) return;
+        new ResizeObserver(function () {
+          var wrap = grid.querySelector('.expo-cards');
+          if (wrap) wrap._cols = 0; // forzar a recalcular columnas
+          layoutExpo();
+        }).observe(grid);
+      });
+
+      // Al volver con "atrás" desde el cobro el navegador restaura la página
+      // tal cual (con los botones bloqueados); se recarga para empezar limpio.
+      window.addEventListener('pageshow', function (e) { if (e.persisted) location.reload(); });
+
+      // Catálogo de modificadores (leche, jarabes...) para el selector. Se
+      // refresca cada minuto para que una opción agotada deje de ofrecerse.
+      var modCatalog = { groups: {}, products: {} };
+      function loadModCatalog() {
+        return fetch('/api/menu/modifiers').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+          if (!d) return;
+          var groups = {};
+          d.groups.forEach(function (g) { groups[g.id] = g; });
+          modCatalog = { groups: groups, products: d.products || {} };
+        }).catch(function () {});
+      }
+      loadModCatalog();
+      setInterval(loadModCatalog, 60000);
+
+      function modifierPicker() {
+        return {
+          product: null,
+          groups: [],
+          selected: {}, // id de grupo -> [ids de opción]
+          open: function (p) {
+            var ids = modCatalog.products[p.id] || [];
+            this.groups = ids.map(function (id) { return modCatalog.groups[id]; }).filter(function (g) { return g && g.options.length; });
+            var sel = {};
+            // Un grupo obligatorio de una sola opción arranca con la primera
+            // elegida (p. ej. leche entera): un toque menos en lo más común.
+            this.groups.forEach(function (g) { sel[g.id] = (g.min === 1 && g.max === 1) ? [g.options[0].id] : []; });
+            this.selected = sel;
+            this.product = p;
+          },
+          rule: function (g) {
+            if (g.min === g.max) return 'Elige ' + g.min;
+            if (g.min === 0) return 'Opcional' + (g.max > 1 ? ', hasta ' + g.max : '');
+            return 'Elige de ' + g.min + ' a ' + g.max;
+          },
+          isOn: function (g, o) { return this.selected[g.id].indexOf(o.id) !== -1; },
+          toggle: function (g, o) {
+            var list = this.selected[g.id], i = list.indexOf(o.id);
+            if (i !== -1) { if (!(g.max === 1 && g.min === 1)) list.splice(i, 1); return; }
+            if (g.max === 1) { this.selected[g.id] = [o.id]; return; }
+            if (list.length >= g.max) { toast('Máximo ' + g.max + ' en ' + g.name, 'warn'); return; }
+            list.push(o.id);
+          },
+          get missing() {
+            var self = this;
+            return this.groups.filter(function (g) { return self.selected[g.id].length < g.min; });
+          },
+          get chosen() {
+            var self = this, out = [];
+            this.groups.forEach(function (g) {
+              g.options.forEach(function (o) { if (self.isOn(g, o)) out.push(o); });
+            });
+            return out;
+          },
+          get price() {
+            return this.chosen.reduce(function (s, o) { return s + o.price_extra; }, this.product ? this.product.price : 0);
+          },
+          confirm: function () {
+            if (this.missing.length) { toast('Falta elegir: ' + this.missing[0].name, 'warn'); return; }
+            var ids = this.chosen.map(function (o) { return o.id; });
+            window.dispatchEvent(new CustomEvent('add-to-cart', { detail: {
+              id: this.product.id, name: this.product.name, price: Math.round(this.price * 100) / 100,
+              quantity: 1, notes: '', modifier_ids: ids,
+              modifiers: this.chosen.map(function (o) { return o.name; }).join(' · '),
+              modKey: ids.slice().sort().join(',')
+            } }));
+            this.product = null;
+          }
+        };
+      }
+
+      // La Expo se redibuja cada 4 s; si coincide con un toque, el botón
+      // desaparece entre que se presiona y se suelta y el toque se pierde.
+      // Mientras alguien está tocando la Expo, la actualización espera.
+      var expoTouchedAt = 0;
+      document.addEventListener('pointerdown', function (e) {
+        if (e.target.closest && e.target.closest('#expo-grid')) expoTouchedAt = Date.now();
+      }, true);
+      function expoIdle() { return Date.now() - expoTouchedAt > 2000; }
+
+      function closeOrderModal() {
+        return {
+          reasons: [
+            'Error de captura del mesero',
+            'Orden duplicada',
+            'Cliente canceló antes de recibir',
+            'Cliente se retiró sin pagar',
+            'Otro'
+          ],
+          order: null,
+          reason: '',
+          detail: '',
+          error: '',
+          busy: false,
+          open: function (o) {
+            this.order = o; this.reason = ''; this.detail = ''; this.error = ''; this.busy = false;
+          },
+          // Si ya se entregó algo, "por qué" deja de ser opcional.
+          get detailRequired() {
+            return this.reason === 'Otro' || (this.order && this.order.delivered > 0);
+          },
+          submit: async function () {
+            if (!this.reason) { this.error = 'Selecciona el motivo'; return; }
+            var detail = this.detail.trim();
+            if (this.detailRequired && !detail) { this.error = 'Explica qué pasó'; return; }
+            this.busy = true;
+            this.error = '';
+            try {
+              var res = await fetch('/api/orders/' + this.order.id + '/cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason: this.reason + (detail ? ': ' + detail : '') })
+              });
+              if (!res.ok) { this.error = await res.text(); return; }
+              toast(this.order.title + ' cerrada sin pago. Quedó registrada en la bitácora.', 'warn');
+              this.order = null;
+              htmx.trigger(document.body, 'reload');
+            } catch (e) {
+              this.error = 'No se pudo conectar con el servidor';
+            } finally {
+              this.busy = false;
+            }
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>
+      [x-cloak] { display: none !important; }
+      .expo-card:not(.expanded) [data-extra],
+      .expo-card:not(.expanded) .when-expanded,
+      .expo-card.expanded .when-collapsed { display: none; }
+    </style>
+  </head>
+  <body
+    class="bg-gray-100 h-screen font-sans antialiased overflow-hidden"
+    @add-to-cart.window="addToCart($event.detail)"
+    @pick-table.window="selectedTable = $event.detail; pane = 'menu'"
+    x-data="{ 
+        orderType: 'DINE_IN', // DINE_IN, TAKEAWAY, FLASH
+        selectedTable: null, 
+        customerName: '',
+        orderNotes: '',
+        cart: [],
+        sending: '', // '' | 'register' | 'pay': envío en curso, bloquea los botones
+
+        // Cuentas por persona: [{ pos, name }] de la orden (las de la mesa ya
+        // guardadas más las nuevas); activeGuest recibe lo que se va tocando
+        // (0 = la mesa en general).
+        guests: [],
+        activeGuest: 0,
+        tableOrderId: null, // orden abierta de la mesa elegida (pre-cuenta del mesero)
+        pane: 'tables',     // pantallas angostas: tables | menu | cart
+        preBillBusy: false,
+        async printTablePreBill() {
+            if (!this.tableOrderId || this.preBillBusy) return;
+            this.preBillBusy = true;
+            try {
+                let res = await fetch('/api/orders/' + this.tableOrderId + '/prebill', { method: 'POST' });
+                if (res.ok) toast('Pre-cuenta enviada a ' + (await res.json()).printer);
+                else toast((await res.text()) || 'No se pudo imprimir la pre-cuenta', 'error');
+            } catch (e) {
+                toast('No se pudo conectar con el servidor', 'error');
+            } finally {
+                this.preBillBusy = false;
+            }
+        },
+        init() {
+            this.$watch('selectedTable', t => this.loadGuests(t));
+        },
+        async loadGuests(t) {
+            this.guests = [];
+            this.activeGuest = 0;
+            this.tableOrderId = null;
+            if (!t) return;
+            try {
+                let res = await fetch('/api/tables/' + t.id + '/guests');
+                if (!res.ok) return;
+                let out = await res.json();
+                // Si mientras tanto se eligió otra mesa, no se mezclan.
+                if (!this.selectedTable || this.selectedTable.id !== t.id) return;
+                this.guests = out.guests.map(g => ({ pos: g.position, name: g.name }));
+                this.tableOrderId = out.order_id;
+            } catch (e) {}
+        },
+        guestLabel(pos) {
+            if (!pos) return this.orderType === 'DINE_IN' ? 'Mesa' : 'General';
+            let g = this.guests.find(x => x.pos === pos);
+            return (g && g.name) || ('Persona ' + pos);
+        },
+        addGuest() {
+            let pos = this.guests.reduce((m, g) => Math.max(m, g.pos), 0) + 1;
+            this.guests.push({ pos: pos, name: '' });
+            this.activeGuest = pos;
+        },
+        // Tocar la persona activa otra vez le pone nombre.
+        tapGuest(pos) {
+            if (pos && this.activeGuest === pos) {
+                let g = this.guests.find(x => x.pos === pos);
+                let name = prompt('Nombre de la persona (opcional)', g.name || '');
+                if (name !== null) g.name = name.trim().slice(0, 30);
+                return;
+            }
+            this.activeGuest = pos;
+        },
+        piecesFor(pos) {
+            return this.cart.filter(i => (i.guest || 0) === pos).reduce((n, i) => n + i.quantity, 0);
+        },
+        
+        selectOrderType(type) {
+            this.orderType = type;
+            this.guests = [];
+            this.activeGuest = 0;
+            if (type !== 'DINE_IN') {
+                this.selectedTable = null;
+            } else {
+                window.dispatchEvent(new Event('tables-reload'));
+            }
+        },
+
+        // Productos con modificadores abren el selector; los demás se agregan directo.
+        pickProduct(ds) {
+            let p = { id: Number(ds.id), name: ds.name, price: Number(ds.price) };
+            if ((modCatalog.products[p.id] || []).length) {
+                window.dispatchEvent(new CustomEvent('pick-modifiers', { detail: p }));
+                return;
+            }
+            this.addToCart({ ...p, quantity: 1, notes: '', modifier_ids: [], modifiers: '', modKey: '' });
+        },
+
+        addToCart(item) {
+            item.guest = this.orderType === 'FLASH' ? 0 : this.activeGuest;
+            let existing = this.cart.find(i => i.id === item.id && i.notes === item.notes && (i.modKey || '') === (item.modKey || '') && (i.guest || 0) === item.guest);
+            if (existing) {
+                existing.quantity++;
+            } else {
+                this.cart.push({...item});
+            }
+        },
+
+        getTotal() {
+            return this.cart.reduce((sum, i) => sum + (i.price * i.quantity), 0).toFixed(2);
+        },
+
+        // payNow: registra la comanda y abre la pantalla de cobro.
+        async sendOrder(payNow = false) {
+    if (this.sending) return;
+    if (this.orderType === 'DINE_IN' && !this.selectedTable) {
+        toast('Selecciona una mesa.', 'warn');
+        return;
+    }
+    if (this.orderType === 'TAKEAWAY' && !this.customerName.trim()) {
+        toast('Ingresa el nombre del cliente.', 'warn');
+        return;
+    }
+    if (this.cart.length === 0) return;
+
+    // Un identificador por envío: si la petición llega dos veces, el servidor
+    // no duplica productos ni comandas.
+    let clientRef = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+    let payload = {
+        client_ref: clientRef,
+        table_id: (this.orderType === 'DINE_IN' && this.selectedTable) ? Number(this.selectedTable.id) : null,
+        order_type: this.orderType,
+        customer: this.customerName.trim(),
+        notes: this.orderNotes,
+        guest_count: 1,
+        items: this.cart.map(i => ({
+            product_id: i.id,
+            unit_price: Number(i.price),
+            quantity: Number(i.quantity),
+            notes: i.notes || '',
+            modifier_ids: i.modifier_ids || [],
+            guest: this.orderType === 'FLASH' ? 0 : (i.guest || 0)
+        })),
+        guest_names: Object.fromEntries(this.guests.filter(g => g.name).map(g => [g.pos, g.name]))
+    };
+
+            this.sending = payNow ? 'pay' : 'register';
+            try {
+                let res = await fetch('/api/orders/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (res.ok) {
+                    let out = await res.json();
+                    let prints = out.prints || { printed: [], failed: [] };
+                    let printFailed = prints.failed.length > 0
+                        ? 'Orden registrada, pero no se pudo imprimir la comanda en:\n' + prints.failed.join('\n') + '\nReintenta con Re-Imprimir en el Monitor Expo.'
+                        : '';
+                    if (payNow) {
+                        if (printFailed) toast.next(printFailed, 'error');
+                        this.sending = 'navigating';
+                        window.location.href = '/cobrar/' + out.order_id + '?volver=pos';
+                        return;
+                    }
+                    this.cart = [];
+                    this.pane = 'tables';
+                    this.guests = [];
+                    this.activeGuest = 0;
+                    this.orderNotes = '';
+                    this.customerName = '';
+                    this.selectedTable = null;
+
+                    window.dispatchEvent(new Event('tables-reload'));
+                    if (document.querySelector('#expo-grid')) {
+                        htmx.trigger('#expo-grid', 'reload');
+                    }
+
+                    if (printFailed) {
+                        toast(printFailed, 'error');
+                    } else {
+                        toast('Comanda registrada' +
+                            (prints.printed.length ? ' · Impresa en: ' + prints.printed.join(', ') : ''));
+                    }
+                } else {
+                    let errorText = await res.text();
+                    console.error('Error del servidor:', res.status, errorText);
+                    toast(errorText || 'Error en el servidor. Revisa los logs.', 'error');
+                }
+            } catch (err) {
+                console.error(err);
+                toast('No se pudo conectar con el servidor.', 'error');
+            } finally {
+                // Al ir a cobrar la página cambia: los botones siguen bloqueados.
+                if (!(payNow && this.sending === 'navigating')) this.sending = '';
+            }
+        }
+      }"
+  >
+    <!-- Header con Selector de Módulo -->
+    {{- if and .Waiter (not .Terminal.UserName) }}
+    <!-- Terminal de mesero sin sesión: ¿quién eres? -->
+    <div class="fixed inset-0 z-50 bg-slate-900 flex items-center justify-center p-4" x-data="pinPad()"
+      @keydown.window="if (/^[0-9]$/.test($event.key)) press($event.key); else if ($event.key === 'Backspace') back(); else if ($event.key === 'Enter') submit()">
+      <div class="w-full max-w-xs text-center">
+        <p class="text-4xl mb-2">☕</p>
+        <h2 class="text-white text-xl font-black">¿Quién eres?</h2>
+        <p class="text-slate-400 text-xs mt-1">{{.Terminal.Name}} · entra con tu PIN</p>
+        <div class="flex justify-center gap-3 my-6">
+          <template x-for="i in 6" :key="i">
+            <span class="w-3.5 h-3.5 rounded-full border-2" :class="pin.length >= i ? 'bg-white border-white' : (i > 4 ? 'border-slate-700' : 'border-slate-500')"></span>
+          </template>
+        </div>
+        <p x-show="error" x-text="error" class="text-rose-400 text-xs font-semibold mb-3"></p>
+        <div class="grid grid-cols-3 gap-3">
+          <template x-for="d in ['1','2','3','4','5','6','7','8','9']" :key="d">
+            <button @click="press(d)" class="h-16 rounded-2xl bg-slate-800 active:bg-slate-700 text-white text-2xl font-black" x-text="d"></button>
+          </template>
+          <button @click="back()" class="h-16 rounded-2xl bg-slate-800 active:bg-slate-700 text-slate-300 text-xl">⌫</button>
+          <button @click="press('0')" class="h-16 rounded-2xl bg-slate-800 active:bg-slate-700 text-white text-2xl font-black">0</button>
+          <button @click="submit()" :disabled="pin.length < 4 || busy" class="h-16 rounded-2xl bg-emerald-500 active:bg-emerald-400 text-slate-950 text-xl font-black disabled:opacity-40">→</button>
+        </div>
+      </div>
+    </div>
+    {{- end }}
+    <header
+      class="bg-slate-900 text-white px-3 py-3 md:p-4 shadow-md flex justify-between items-center gap-2 h-16"
+      x-data="{ currentTab: new URLSearchParams(location.search).get('tab') || 'pos' }"
+    >
+      <div class="flex items-center gap-3 md:gap-6 min-w-0">
+        <h1 class="text-xl font-bold tracking-wide flex items-center gap-2 shrink-0">
+          <span>☕</span> <span class="hidden md:inline">Open POS</span>
+          <span
+            class="hidden lg:inline text-xs bg-emerald-500 text-black px-2 py-0.5 rounded-full uppercase font-mono"
+            >Local</span
+          >
+        </h1>
+
+        <!-- Navegación entre Venta y Expo -->
+        <nav class="flex bg-slate-800 p-1 rounded-xl gap-1">
+          <button
+            @click="currentTab = 'pos'; $dispatch('switch-tab', 'pos')"
+            :class="currentTab === 'pos' ? 'bg-emerald-500 text-slate-950 font-black' : 'text-gray-300 hover:text-white'"
+            class="px-4 py-1.5 rounded-lg text-xs transition"
+          >
+            🛒 <span class="hidden sm:inline">Toma de </span>Orden
+          </button>
+          <button
+            @click="currentTab = 'expo'; $dispatch('switch-tab', 'expo')"
+            :class="currentTab === 'expo' ? 'bg-emerald-500 text-slate-950 font-black' : 'text-gray-300 hover:text-white'"
+            class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2"
+          >
+            📡 <span class="hidden sm:inline">Monitor </span>Expo{{if not .Waiter}}<span class="hidden sm:inline"> / Caja</span>{{end}}
+          </button>
+        </nav>
+      </div>
+
+      <div class="flex items-center gap-2 md:gap-4 shrink-0">
+        {{- if .Waiter }}
+        {{- if .Terminal.UserName }}
+        <button onclick="terminalLogout()" title="Salir para que entre otra persona"
+          class="text-xs text-gray-200 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg transition">
+          👤 <b>{{.Terminal.UserName}}</b> · Salir
+        </button>
+        {{- end }}
+        {{- else }}
+        <a
+          href="/caja"
+          class="text-xs text-gray-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg transition"
+          >💵 Caja</a
+        >
+        <a
+          href="/admin"
+          class="text-xs text-gray-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg transition"
+          >⚙️ Admin</a
+        >
+        {{- end }}
+        <div
+          class="hidden md:block text-sm font-mono text-gray-300"
+          x-data="{ time: '' }"
+          x-init="setInterval(() => time = new Date().toLocaleTimeString(), 1000)"
+          x-text="time"
+        ></div>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main
+      class="h-[calc(100dvh-64px)]"
+      x-data="{ activeTab: new URLSearchParams(location.search).get('tab') || 'pos' }"
+      @switch-tab.window="activeTab = $event.detail"
+    >
+      <!-- MÓDULO 1: POS / TOMA DE ORDEN -->
+      <div x-show="activeTab === 'pos'" class="flex h-full pb-14 lg:pb-0">
+        <!-- Panel Izquierdo: Modalidad de Venta y Mesas -->
+        <section
+          class="w-full lg:w-5/12 p-4 lg:p-5 overflow-y-auto border-r border-gray-200 bg-white flex-col justify-between lg:flex"
+          :class="pane === 'tables' ? 'flex' : 'hidden'"
+        >
+          <div>
+            <!-- Botones de Modalidad de Venta -->
+            <div class="mb-5">
+              <label
+                class="text-xs font-bold uppercase tracking-wider text-gray-400 block mb-2"
+                >Tipo de Venta</label
+              >
+              <div class="grid {{if .Waiter}}grid-cols-2{{else}}grid-cols-3{{end}} gap-2 bg-gray-100 p-1 rounded-xl">
+                <button
+                  @click="selectOrderType('DINE_IN')"
+                  :class="orderType === 'DINE_IN' ? 'bg-white shadow text-slate-900 font-bold' : 'text-gray-500 hover:text-gray-900'"
+                  class="py-2.5 text-xs rounded-lg transition flex justify-center items-center gap-1"
+                >
+                  🍽️ Mesa
+                </button>
+                <button
+                  @click="selectOrderType('TAKEAWAY')"
+                  :class="orderType === 'TAKEAWAY' ? 'bg-white shadow text-slate-900 font-bold' : 'text-gray-500 hover:text-gray-900'"
+                  class="py-2.5 text-xs rounded-lg transition flex justify-center items-center gap-1"
+                >
+                  🛍️ Para Llevar
+                </button>
+                {{- if not .Waiter }}
+                <button
+                  @click="selectOrderType('FLASH')"
+                  :class="orderType === 'FLASH' ? 'bg-white shadow text-slate-900 font-bold' : 'text-gray-500 hover:text-gray-900'"
+                  class="py-2.5 text-xs rounded-lg transition flex justify-center items-center gap-1"
+                >
+                  ⚡ Flash / Mostrador
+                </button>
+                {{- end }}
+              </div>
+            </div>
+
+            <!-- Si es Para Llevar: Pedir Nombre de Cliente -->
+            <div
+              x-show="orderType === 'TAKEAWAY'"
+              class="mb-4 bg-amber-50 p-3 rounded-xl border border-amber-200"
+            >
+              <label class="text-xs font-bold text-amber-900 block mb-1"
+                >Nombre o Folio del Cliente</label
+              >
+              <input
+                type="text"
+                x-model="customerName"
+                placeholder="Ej. Cliente Juan / Pedido #12"
+                class="w-full text-sm p-2 rounded-lg border border-amber-300 focus:outline-none focus:ring-2 focus:ring-amber-500 bg-white"
+              />
+            </div>
+
+            <!-- Si es Comedor: plano o lista de mesas -->
+            <div x-show="orderType === 'DINE_IN'" x-data="floorPicker()" x-init="start()">
+              <div class="flex justify-between items-center gap-2 mb-3">
+                <h3 class="text-sm font-bold text-gray-700">Seleccionar Mesa</h3>
+                <div class="flex bg-gray-100 p-0.5 rounded-lg text-xs">
+                  <button @click="setView('plan')" :class="view === 'plan' ? 'bg-white shadow font-bold text-slate-900' : 'text-gray-500'" class="px-2.5 py-1 rounded-md">🗺️ Plano</button>
+                  <button @click="setView('list')" :class="view === 'list' ? 'bg-white shadow font-bold text-slate-900' : 'text-gray-500'" class="px-2.5 py-1 rounded-md">☰ Lista</button>
+                </div>
+              </div>
+
+              <div x-show="view === 'plan' && zones.length > 1" class="flex flex-wrap gap-1.5 mb-3">
+                <template x-for="z in zones" :key="z.name">
+                  <button @click="setZone(z.name)"
+                    :class="zone === z.name ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-gray-600 border-gray-200'"
+                    class="text-xs font-bold px-3 py-1.5 rounded-lg border">
+                    <span x-text="z.name"></span>
+                    <span class="opacity-60 font-semibold" x-text="z.tables.filter(t => t.status === 'OCCUPIED').length + '/' + z.tables.length"></span>
+                  </button>
+                </template>
+              </div>
+
+              <p x-show="!loaded" class="text-gray-400 text-xs italic">Cargando mesas...</p>
+              <p x-show="failed" x-cloak class="text-rose-600 text-xs font-semibold mb-2">Sin conexión con el servidor; reintentando…</p>
+              <p x-show="loaded && !failed && zones.length === 0" x-cloak class="text-gray-400 text-xs italic">No hay mesas. Agrégalas en Admin → Mesas.</p>
+
+              <!-- Plano -->
+              <div x-ref="box" x-show="view === 'plan'" class="w-full overflow-x-auto">
+                <template x-if="plan">
+                  <div class="relative mx-auto" :style="plan.style">
+                    <template x-for="it in current.items" :key="'i' + it.id">
+                      <div class="absolute flex items-center justify-center text-center font-black leading-tight pointer-events-none"
+                        :class="Floor.KINDS[it.kind].cls" :style="itemStyle(it)">
+                        <span class="px-1 break-words" x-text="it.label"></span>
+                      </div>
+                    </template>
+                    <template x-for="t in current.tables" :key="'t' + t.id">
+                      <button @click="pick(t)" :style="tableStyle(t)"
+                        :class="[
+                          t.shape === 'ROUND' ? 'rounded-full' : 'rounded-xl',
+                          t.status === 'OCCUPIED' ? 'bg-rose-500 border-rose-600 active:bg-rose-600' : 'bg-emerald-500 border-emerald-600 active:bg-emerald-600',
+                          selectedTable && selectedTable.id === t.id ? 'ring-4 ring-slate-900 ring-offset-2 z-10' : ''
+                        ]"
+                        class="absolute text-white border-b-4 shadow-sm flex flex-col items-center justify-center text-center leading-tight transition active:scale-95">
+                        <span class="font-black px-1 break-words" x-text="t.name"></span>
+                        <span x-show="t.status === 'OCCUPIED' && roomy(t)" class="text-[11px] font-semibold opacity-90 mt-0.5" x-text="minutes(t.minutes) + ' · ' + money(t.total)"></span>
+                      </button>
+                    </template>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Lista -->
+              <div x-show="view === 'list'" class="space-y-4">
+                <template x-for="z in zones" :key="z.name">
+                  <div>
+                    <p x-show="zones.length > 1" class="text-[11px] font-bold uppercase tracking-wider text-gray-400 mb-2" x-text="z.name"></p>
+                    <div class="grid grid-cols-2 gap-3">
+                      <template x-for="t in z.tables" :key="t.id">
+                        <button @click="pick(t)"
+                          :class="[
+                            t.status === 'OCCUPIED' ? 'bg-rose-500 border-rose-600 hover:bg-rose-600' : 'bg-emerald-500 border-emerald-600 hover:bg-emerald-600',
+                            selectedTable && selectedTable.id === t.id ? 'ring-4 ring-slate-900 ring-offset-2' : ''
+                          ]"
+                          class="text-white p-4 rounded-2xl shadow-sm border-b-4 flex flex-col justify-between h-28 transition transform active:scale-95 text-left">
+                          <span class="text-xs uppercase font-bold tracking-wider opacity-80" x-text="z.name"></span>
+                          <div>
+                            <h3 class="text-2xl font-black" x-text="t.name"></h3>
+                            <p class="text-xs opacity-90" x-text="t.status === 'OCCUPIED' ? minutes(t.minutes) + ' · ' + money(t.total) : 'Libre'"></p>
+                          </div>
+                        </button>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+
+              <div x-show="loaded && zones.length" class="flex gap-4 mt-3 text-[11px] text-gray-500">
+                <span><span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 align-middle mr-1"></span>Libres: <b x-text="count('FREE')"></b></span>
+                <span><span class="inline-block w-2.5 h-2.5 rounded-full bg-rose-500 align-middle mr-1"></span>Ocupadas: <b x-text="count('OCCUPIED')"></b></span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Panel Derecho: Menú y Comanda -->
+        <section class="contents lg:flex lg:w-7/12 bg-gray-50">
+          <!-- Menú: árbol de categorías -->
+          <div class="w-full lg:w-1/2 border-r border-gray-200 flex-col min-h-0 bg-gray-50 lg:flex" :class="pane === 'menu' ? 'flex' : 'hidden'"
+            x-data="menuBrowser()" x-init="start()">
+            <div class="px-4 pt-4 pb-3 border-b border-gray-200 bg-gray-50 space-y-2">
+              <div class="relative">
+                <input type="text" x-model="q" placeholder="🔍 Buscar producto o categoría…" autocomplete="off" @keydown.escape="q = ''"
+                  class="w-full text-sm pl-3 pr-8 py-2 rounded-xl border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-slate-400" />
+                <button x-show="q" x-cloak @click="q = ''" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 text-sm px-1">✕</button>
+              </div>
+              <!-- Ruta: Menú › Bebidas › Con café -->
+              <nav x-show="!q" class="flex items-center gap-1 text-sm min-h-[36px]">
+                <button x-show="path.length" x-cloak @click="back()" title="Regresar"
+                  class="shrink-0 w-9 h-9 rounded-xl bg-white border border-gray-200 hover:border-gray-400 font-bold text-gray-700 active:scale-95">←</button>
+                <div class="flex items-center gap-1 overflow-x-auto whitespace-nowrap">
+                  <button @click="goTo(0)" :class="path.length ? 'text-slate-600 hover:underline' : 'text-gray-900 font-black'" class="font-bold px-1">Menú</button>
+                  <template x-for="(c, i) in crumbs" :key="c.id">
+                    <span class="flex items-center gap-1">
+                      <span class="text-gray-300">›</span>
+                      <button @click="goTo(i + 1)" :class="i === crumbs.length - 1 ? 'text-gray-900 font-black' : 'text-slate-600 font-bold hover:underline'"
+                        class="px-1" x-text="c.name"></button>
+                    </span>
+                  </template>
+                </div>
+              </nav>
+            </div>
+
+            <div x-ref="scroller" class="flex-1 overflow-y-auto p-4">
+              <p x-show="!loaded" class="text-xs text-gray-400 italic">Cargando catálogo...</p>
+              <p x-show="failed" x-cloak class="text-xs text-rose-600 font-semibold mb-2">Sin conexión con el servidor; reintentando…</p>
+
+              <!-- Resultados de búsqueda -->
+              <template x-if="q">
+                <div>
+                  <p x-show="!results.length" class="text-xs text-gray-400 italic">Sin resultados para “<span x-text="q"></span>”.</p>
+                  <div class="grid grid-cols-1 gap-2">
+                    <template x-for="p in results" :key="p.id">
+                      <button type="button" @click="pick(p)" :disabled="!p.available"
+                        :class="p.available ? 'bg-white hover:border-gray-400 active:scale-95' : 'bg-gray-100 border-dashed opacity-70 cursor-not-allowed'"
+                        class="p-3 rounded-xl border border-gray-200 shadow-sm text-left transition flex justify-between items-center gap-2">
+                        <span class="min-w-0">
+                          <span class="block font-bold text-sm" :class="p.available ? 'text-gray-800' : 'text-gray-400 line-through'" x-text="p.name"></span>
+                          <span class="block text-[11px] text-gray-400 truncate" x-text="p.where"></span>
+                        </span>
+                        <span class="shrink-0 text-right">
+                          <span x-show="p.available" class="block text-xs font-mono font-semibold text-emerald-600" x-text="'$' + p.price.toFixed(2)"></span>
+                          <span x-show="!p.available" class="block text-[10px] font-black uppercase text-rose-500">Agotado</span>
+                          <span x-show="p.has_mods && p.available" class="block text-[10px] font-bold text-sky-700">+ opciones</span>
+                        </span>
+                      </button>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Nodo actual: subcategorías y productos -->
+              <template x-if="!q && loaded">
+                <div class="space-y-4">
+                  <div x-show="node.children.length" class="grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(128px, 1fr))">
+                    <template x-for="c in node.children" :key="c.id">
+                      <button type="button" @click="open(c)" :style="'border-left-color:' + c.color"
+                        class="bg-white h-24 p-3 rounded-xl border border-gray-200 border-l-[6px] shadow-sm hover:shadow active:scale-95 transition text-left flex flex-col justify-between">
+                        <span class="font-black text-gray-900 text-base leading-tight" x-text="c.name"></span>
+                        <span class="flex justify-between items-center text-[11px] text-gray-400 font-semibold">
+                          <span x-text="count(c) + (count(c) === 1 ? ' producto' : ' productos')"></span>
+                          <span class="text-lg text-gray-300 leading-none">›</span>
+                        </span>
+                      </button>
+                    </template>
+                  </div>
+
+                  <div x-show="node.products.length">
+                    <p x-show="node.children.length" class="text-[11px] font-bold uppercase tracking-wider text-gray-400 mb-2">Productos</p>
+                    <div class="grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(128px, 1fr))">
+                      <template x-for="p in node.products" :key="p.id">
+                        <button type="button" @click="pick(p)" :disabled="!p.available" :title="p.available ? '' : 'Agotado'"
+                          :class="p.available ? 'bg-white border-gray-200 shadow-sm hover:border-gray-400 hover:shadow active:scale-95' : 'bg-gray-100 border-dashed border-gray-300 opacity-70 cursor-not-allowed'"
+                          class="p-3 rounded-xl border transition text-left flex flex-col justify-between min-h-[72px]">
+                          <span class="font-bold text-sm" :class="p.available ? 'text-gray-800' : 'text-gray-400 line-through'" x-text="p.name"></span>
+                          <span class="flex justify-between items-center mt-1 gap-1">
+                            <span x-show="p.available" class="text-xs font-mono font-semibold text-emerald-600" x-text="'$' + p.price.toFixed(2)"></span>
+                            <span x-show="!p.available" class="text-[10px] font-black uppercase text-rose-500">Agotado</span>
+                            <span x-show="p.has_mods && p.available" class="text-[10px] font-bold text-sky-700">+ opciones</span>
+                          </span>
+                        </button>
+                      </template>
+                    </div>
+                  </div>
+
+                  <p x-show="!node.children.length && !node.products.length" class="text-xs text-gray-400 italic">
+                    No hay productos. Agrégalos en Admin → Menú.
+                  </p>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Detalle de Comanda -->
+          <div class="w-full lg:w-1/2 p-4 lg:p-5 flex-col justify-between bg-white overflow-y-auto lg:flex" :class="pane === 'cart' ? 'flex' : 'hidden'">
+            <div>
+              <div
+                class="flex justify-between items-center pb-3 border-b border-gray-100 mb-3"
+              >
+                <div>
+                  <span
+                    class="text-xs text-gray-400 uppercase tracking-wider font-bold"
+                    >Comanda</span
+                  >
+                  <h4
+                    class="text-base font-black text-gray-800"
+                    x-text="orderType === 'DINE_IN' ? (selectedTable ? selectedTable.name : 'Sin Mesa') : (orderType === 'TAKEAWAY' ? (customerName || 'Para Llevar') : 'Venta Mostrador')"
+                  ></h4>
+                </div>
+                <span
+                  class="px-2.5 py-1 text-xs font-bold rounded-full bg-slate-100 text-slate-700"
+                  x-text="orderType"
+                ></span>
+              </div>
+
+              <!-- Cuentas por persona -->
+              <div x-show="orderType !== 'FLASH'" class="mb-3">
+                <div class="flex flex-wrap gap-1.5">
+                  <button @click="tapGuest(0)"
+                    :class="activeGuest === 0 ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-gray-700 border-gray-200'"
+                    class="text-xs font-bold px-2.5 py-1.5 rounded-lg border">
+                    <span x-text="guestLabel(0)"></span>
+                    <span x-show="piecesFor(0)" class="opacity-60" x-text="' ' + piecesFor(0)"></span>
+                  </button>
+                  <template x-for="g in guests" :key="g.pos">
+                    <button @click="tapGuest(g.pos)"
+                      :class="activeGuest === g.pos ? 'bg-sky-700 text-white border-sky-700' : 'bg-white text-sky-800 border-sky-200'"
+                      class="text-xs font-bold px-2.5 py-1.5 rounded-lg border">
+                      <span x-text="guestLabel(g.pos)"></span>
+                      <span x-show="piecesFor(g.pos)" class="opacity-60" x-text="' ' + piecesFor(g.pos)"></span>
+                    </button>
+                  </template>
+                  <button @click="addGuest()" class="text-xs font-bold px-2.5 py-1.5 rounded-lg border border-dashed border-gray-300 text-gray-500 hover:border-gray-400">+ Persona</button>
+                </div>
+                <p x-show="guests.length" class="text-[11px] text-gray-400 mt-1">
+                  Lo que agregues va a <b class="text-gray-600" x-text="guestLabel(activeGuest)"></b>. Toca de nuevo a la persona para ponerle nombre.
+                </p>
+              </div>
+
+              <!-- Listado del Carrito -->
+              <div class="space-y-2 max-h-[280px] overflow-y-auto pr-1">
+                <template x-for="(item, index) in cart" :key="index">
+                  <div
+                    class="bg-gray-50 p-2.5 rounded-xl border border-gray-200"
+                  >
+                    <div class="flex justify-between items-start mb-1">
+                      <span
+                        class="text-sm font-bold text-gray-800"
+                        x-text="item.name"
+                      ></span>
+                      <span
+                        class="text-xs font-mono font-bold text-emerald-600"
+                        x-text="'$' + (item.price * item.quantity).toFixed(2)"
+                      ></span>
+                    </div>
+                    <p
+                      x-show="item.modifiers"
+                      class="text-[11px] font-semibold text-sky-800 -mt-0.5 mb-1"
+                      x-text="'+ ' + item.modifiers"
+                    ></p>
+                    <!-- De quién es (cuentas por persona) -->
+                    <select x-show="guests.length && orderType !== 'FLASH'" x-model.number="item.guest"
+                      class="w-full text-[11px] font-semibold text-sky-800 p-1 mb-1.5 bg-white border border-sky-200 rounded">
+                      <option :value="0" x-text="'Para: ' + guestLabel(0)"></option>
+                      <template x-for="g in guests" :key="g.pos">
+                        <option :value="g.pos" x-text="'Para: ' + guestLabel(g.pos)"></option>
+                      </template>
+                    </select>
+                    <input
+                      type="text"
+                      x-model="item.notes"
+                      placeholder="Nota: Ej. Extra caliente, descafeinado..."
+                      class="w-full text-xs p-1 bg-white border border-gray-200 rounded mb-2 text-gray-600 focus:outline-none"
+                    />
+                    <div class="flex justify-between items-center">
+                      <div class="flex items-center gap-2">
+                        <button
+                          @click="if(item.quantity > 1) item.quantity--; else cart.splice(index, 1)"
+                          class="w-6 h-6 bg-gray-200 rounded font-bold text-xs hover:bg-gray-300"
+                        >
+                          -
+                        </button>
+                        <span
+                          class="text-xs font-bold"
+                          x-text="item.quantity"
+                        ></span>
+                        <button
+                          @click="item.quantity++"
+                          class="w-6 h-6 bg-gray-200 rounded font-bold text-xs hover:bg-gray-300"
+                        >
+                          +
+                        </button>
+                      </div>
+                      <button
+                        @click="cart.splice(index, 1)"
+                        class="text-xs text-rose-500 hover:underline"
+                      >
+                        Quitar
+                      </button>
+                    </div>
+                  </div>
+                </template>
+
+                <template x-if="cart.length === 0">
+                  <p class="text-xs text-gray-400 italic text-center py-10">
+                    Toca los productos del menú para agregarlos.
+                  </p>
+                </template>
+              </div>
+
+              <!-- Comentario General de la Orden -->
+              <template x-if="cart.length > 0">
+                <div class="mt-3">
+                  <textarea
+                    x-model="orderNotes"
+                    rows="2"
+                    placeholder="Notas generales para cocina/barra..."
+                    class="w-full text-xs p-2 border border-gray-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-slate-400 bg-gray-50"
+                  ></textarea>
+                </div>
+              </template>
+            </div>
+
+            <!-- Total y Acción -->
+            <div class="border-t border-gray-100 pt-3 mt-auto">
+              <div class="flex justify-between items-center mb-3">
+                <span class="text-xs font-bold text-gray-500">TOTAL:</span>
+                <span
+                  class="text-xl font-black text-gray-900 font-mono"
+                  x-text="'$' + getTotal()"
+                ></span>
+              </div>
+              <div class="flex gap-2">
+                <button
+                  @click="sendOrder()"
+                  :disabled="cart.length === 0 || !!sending"
+                  :class="cart.length === 0 || sending ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 text-white'"
+                  class="flex-1 py-3 rounded-xl font-bold text-sm shadow transition flex items-center justify-center gap-2"
+                >
+                  <span x-show="sending === 'register'" class="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></span>
+                  <span x-text="sending === 'register' ? 'Enviando…' : '🚀 Registrar Comanda'"></span>
+                </button>
+                {{- if not .Waiter }}
+                <button
+                  @click="sendOrder(true)"
+                  :disabled="cart.length === 0 || !!sending"
+                  :class="cart.length === 0 || sending ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800 text-white'"
+                  class="flex-1 py-3 rounded-xl font-bold text-sm shadow transition flex items-center justify-center gap-2"
+                  title="Registra la comanda y abre el cobro"
+                >
+                  <span x-show="sending === 'pay' || sending === 'navigating'" class="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></span>
+                  <span x-text="sending === 'pay' || sending === 'navigating' ? 'Abriendo cobro…' : '💳 Cobrar ahora'"></span>
+                </button>
+                {{- end }}
+              </div>
+              {{- if .Waiter }}
+              <!-- Mesero: pre-cuenta de la mesa para llevarla (el cobro es en caja) -->
+              <button
+                x-show="orderType === 'DINE_IN' && selectedTable && selectedTable.status === 'OCCUPIED' && cart.length === 0"
+                @click="printTablePreBill()" :disabled="preBillBusy"
+                class="mt-2 block w-full text-center py-3 rounded-xl font-bold text-sm bg-slate-900 hover:bg-slate-800 text-white shadow transition disabled:opacity-50"
+                x-text="preBillBusy ? 'Imprimiendo…' : '🧾 Pre-cuenta de ' + (selectedTable && selectedTable.name)"
+              ></button>
+              {{- else }}
+              <!-- Mesa ocupada sin productos nuevos: ir directo a cobrar su cuenta -->
+              <a
+                x-show="orderType === 'DINE_IN' && selectedTable && selectedTable.status === 'OCCUPIED' && cart.length === 0"
+                :href="selectedTable ? '/cobrar/mesa/' + selectedTable.id + '?volver=pos' : '#'"
+                class="mt-2 block w-full text-center py-3 rounded-xl font-bold text-sm bg-slate-900 hover:bg-slate-800 text-white shadow transition"
+              >
+                💳 Cobrar cuenta de <span x-text="selectedTable && selectedTable.name"></span>
+              </a>
+              {{- end }}
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Pantallas angostas (teléfono, iPad vertical): un panel a la vez -->
+      <nav x-show="activeTab === 'pos'" class="lg:hidden fixed bottom-0 inset-x-0 z-20 bg-white border-t border-gray-200 grid grid-cols-3 h-14">
+        <button @click="pane = 'tables'" :class="pane === 'tables' ? 'text-slate-900 font-black' : 'text-gray-400'" class="text-xs flex flex-col items-center justify-center">
+          <span class="text-lg leading-none">🍽️</span><span x-text="orderType === 'DINE_IN' ? (selectedTable ? selectedTable.name : 'Mesas') : 'Tipo de venta'"></span>
+        </button>
+        <button @click="pane = 'menu'" :class="pane === 'menu' ? 'text-slate-900 font-black' : 'text-gray-400'" class="text-xs flex flex-col items-center justify-center">
+          <span class="text-lg leading-none">📖</span>Menú
+        </button>
+        <button @click="pane = 'cart'" :class="pane === 'cart' ? 'text-slate-900 font-black' : 'text-gray-400'" class="text-xs flex flex-col items-center justify-center relative">
+          <span class="text-lg leading-none">🧾</span>Comanda
+          <span x-show="cart.length" class="absolute top-1.5 right-1/4 bg-emerald-600 text-white text-[10px] font-black rounded-full px-1.5"
+            x-text="cart.reduce((n, i) => n + i.quantity, 0)"></span>
+        </button>
+      </nav>
+
+      <!-- MÓDULO 2: MONITOR EXPO / CAJA -->
+      <div
+        x-show="activeTab === 'expo'"
+        x-data="{ expoTab: new URLSearchParams(location.search).get('expo') || 'DINE_IN' }"
+        class="h-full p-6 bg-gray-50 flex flex-col overflow-hidden"
+      >
+        <!-- Navegación por Sub-Pestañas de Canal -->
+        <div
+          class="flex items-center justify-between mb-4 pb-3 border-b border-gray-200"
+        >
+          <div class="flex bg-gray-200 p-1 rounded-xl gap-1">
+            <button
+              @click="expoTab = 'DINE_IN'; $nextTick(() => htmx.trigger('#expo-grid', 'reload'))"
+              :class="expoTab === 'DINE_IN' ? 'bg-white text-slate-900 shadow font-bold' : 'text-gray-600 hover:text-gray-900'"
+              class="px-5 py-2 rounded-lg text-xs transition flex items-center gap-2"
+            >
+              🍽️ Comedor / Mesas
+            </button>
+            <button
+              @click="expoTab = 'TAKEAWAY'; $nextTick(() => htmx.trigger('#expo-grid', 'reload'))"
+              :class="expoTab === 'TAKEAWAY' ? 'bg-white text-slate-900 shadow font-bold' : 'text-gray-600 hover:text-gray-900'"
+              class="px-5 py-2 rounded-lg text-xs transition flex items-center gap-2"
+            >
+              🛍️ Para Llevar / Mostrador
+            </button>
+          </div>
+
+          <button
+            onclick="htmx.trigger('#expo-grid', 'reload')"
+            class="text-xs text-slate-600 hover:text-slate-900 font-semibold flex items-center gap-1"
+          >
+            🔄 Actualizar
+          </button>
+        </div>
+
+        <!-- Contenedor dinámico HTMX -->
+        <div
+          id="expo-grid"
+          hx-get="/api/expo/html"
+          :hx-vals="JSON.stringify({ type: expoTab })"
+          hx-trigger="load, reload from:body, every 4s[expoIdle()]"
+          class="flex-1 min-h-0 overflow-y-auto"
+        >
+          <div class="text-gray-400 text-xs italic">
+            Cargando monitor de órdenes...
+          </div>
+        </div>
+
+        <!-- Modal: cerrar orden sin pagar -->
+        <div
+          x-data="closeOrderModal()"
+          @close-order.window="open($event.detail)"
+          @keydown.escape.window="order = null"
+          x-show="order"
+          x-cloak
+          @click.self="order = null"
+          class="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4"
+        >
+          <div class="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl" x-show="order">
+            <h2 class="text-lg font-black text-gray-900">
+              Cerrar sin pagar · <span x-text="order && order.title"></span>
+            </h2>
+            <p class="text-xs text-gray-500 mt-1">
+              No se registra como venta, pero el cierre queda en la bitácora con
+              el motivo, la hora y la terminal.
+            </p>
+
+            <div class="mt-4 space-y-2 text-xs" x-show="order">
+              <p
+                x-show="order && order.sent > 0"
+                class="bg-amber-50 border border-amber-200 text-amber-900 rounded-lg px-3 py-2"
+              >
+                ⚠️ Ya se envió comanda de
+                <b x-text="order && order.sent"></b> producto(s).
+              </p>
+              <p
+                x-show="order && order.delivered > 0"
+                class="bg-rose-50 border border-rose-200 text-rose-900 rounded-lg px-3 py-2"
+              >
+                ⛔ Ya se entregaron
+                <b x-text="order && order.delivered"></b> producto(s) al
+                cliente.
+              </p>
+              <p
+                x-show="order && order.hasBills"
+                class="bg-sky-50 border border-sky-200 text-sky-900 rounded-lg px-3 py-2"
+              >
+                Esta orden ya tiene cobros. Lo pendiente
+                (<b x-text="order && order.unpaid"></b>) se anulará y la orden
+                se cerrará con lo que sí se pagó.
+              </p>
+              <p x-show="order && !order.hasBills" class="text-gray-600">
+                Pendiente que no se cobrará:
+                <b class="font-mono" x-text="order && order.unpaid"></b>
+              </p>
+            </div>
+
+            <label class="block text-xs font-bold text-gray-700 mt-4 mb-2">Motivo</label>
+            <div class="grid grid-cols-1 gap-1.5">
+              <template x-for="r in reasons" :key="r">
+                <button
+                  type="button"
+                  @click="reason = r; error = ''"
+                  :class="reason === r ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-gray-700 border-gray-200 hover:border-gray-400'"
+                  class="text-left text-sm px-3 py-2 rounded-xl border transition"
+                  x-text="r"
+                ></button>
+              </template>
+            </div>
+
+            <textarea
+              x-model="detail"
+              rows="2"
+              :placeholder="detailRequired ? 'Explica qué pasó (obligatorio)' : 'Detalle (opcional)'"
+              class="w-full mt-3 text-sm p-2 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-400"
+            ></textarea>
+
+            <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600 mt-2"></p>
+
+            <div class="flex gap-2 mt-4">
+              <button
+                @click="order = null"
+                class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200 text-gray-800"
+              >
+                Volver
+              </button>
+              <button
+                @click="submit()"
+                :disabled="busy"
+                class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-rose-600 hover:bg-rose-700 text-white disabled:opacity-50"
+                x-text="busy ? 'Cerrando…' : 'Cerrar sin pagar'"
+              ></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Selector de modificadores -->
+    <div
+      x-data="modifierPicker()"
+      @pick-modifiers.window="open($event.detail)"
+      @keydown.escape.window="product = null"
+      x-show="product"
+      x-cloak
+      @click.self="product = null"
+      class="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4"
+    >
+      <template x-if="product">
+        <div class="bg-white rounded-3xl w-full max-w-3xl shadow-2xl flex flex-col max-h-[92vh]">
+          <div class="px-7 pt-6 pb-4 border-b border-gray-100">
+            <h2 class="text-2xl font-black text-gray-900" x-text="product.name"></h2>
+            <p class="text-sm text-gray-500 mt-0.5">Precio base <span class="font-mono" x-text="'$' + product.price.toFixed(2)"></span></p>
+          </div>
+          <div class="px-7 py-5 space-y-6 overflow-y-auto">
+            <template x-for="g in groups" :key="g.id">
+              <div>
+                <div class="flex justify-between items-baseline mb-2.5">
+                  <p class="text-lg font-black text-gray-800" x-text="g.name"></p>
+                  <span
+                    class="text-sm font-bold"
+                    :class="selected[g.id].length < g.min ? 'text-rose-600' : 'text-gray-400'"
+                    x-text="rule(g)"
+                  ></span>
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                  <template x-for="o in g.options" :key="o.id">
+                    <button
+                      type="button"
+                      @click="toggle(g, o)"
+                      :class="isOn(g, o) ? 'bg-slate-900 border-slate-900 text-white' : 'bg-white border-gray-200 text-gray-800 hover:border-gray-400'"
+                      class="flex justify-between items-center gap-2 px-4 py-4 min-h-[64px] rounded-2xl border-2 text-left text-base font-semibold active:scale-95 transition"
+                    >
+                      <span x-text="o.name"></span>
+                      <span x-show="o.price_extra > 0" class="text-sm font-mono opacity-80 shrink-0" x-text="'+$' + o.price_extra.toFixed(2)"></span>
+                    </button>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </div>
+          <div class="px-7 py-5 border-t border-gray-100 flex gap-3">
+            <button @click="product = null" class="px-6 py-4 rounded-2xl text-base font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+            <button
+              @click="confirm()"
+              :class="missing.length ? 'bg-gray-300 text-gray-500' : 'bg-emerald-600 hover:bg-emerald-700 text-white'"
+              class="flex-1 py-4 rounded-2xl text-lg font-black transition"
+              x-text="'Agregar · $' + price.toFixed(2)"
+            ></button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </body>
+</html>

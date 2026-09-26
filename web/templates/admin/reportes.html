@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reportes · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script src="/static/js/charts.js"></script>
+    <script>
+      var SERIES = { blue: '#2a78d6', orange: '#eb6834' };
+
+      function ymd(d) {
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      }
+      function addDays(d, n) { var x = new Date(d); x.setDate(x.getDate() + n); return x; }
+
+      function reportsApp() {
+        var today = new Date();
+        return {
+          preset: 'today',
+          from: ymd(today),
+          to: ymd(today),
+          rep: null,
+          timings: null,
+          loading: false,
+          tables: {}, // qué gráficas se ven como tabla
+
+          presets: [
+            { key: 'today', label: 'Hoy' },
+            { key: 'yesterday', label: 'Ayer' },
+            { key: '7d', label: '7 días' },
+            { key: '30d', label: '30 días' },
+            { key: 'month', label: 'Este mes' },
+            { key: 'lastmonth', label: 'Mes pasado' }
+          ],
+
+          init: function () {
+            var saved = null;
+            try { saved = sessionStorage.getItem('open-pos:report-preset'); } catch (e) {}
+            this.setPreset(saved || 'today');
+          },
+          setPreset: function (key) {
+            var t = new Date(), f = t, to = t;
+            if (key === 'yesterday') { f = to = addDays(t, -1); }
+            if (key === '7d') { f = addDays(t, -6); }
+            if (key === '30d') { f = addDays(t, -29); }
+            if (key === 'month') { f = new Date(t.getFullYear(), t.getMonth(), 1); }
+            if (key === 'lastmonth') { f = new Date(t.getFullYear(), t.getMonth() - 1, 1); to = new Date(t.getFullYear(), t.getMonth(), 0); }
+            this.preset = key;
+            this.from = ymd(f);
+            this.to = ymd(to);
+            try { sessionStorage.setItem('open-pos:report-preset', key); } catch (e) {}
+            this.load();
+          },
+          custom: function () {
+            this.preset = 'custom';
+            if (this.from && this.to) this.load();
+          },
+          load: async function () {
+            this.loading = true;
+            try {
+              var q = '?from=' + this.from + '&to=' + this.to;
+              var both = await Promise.all([fetch('/api/admin/reports' + q), fetch('/api/admin/reports/timings' + q)]);
+              var res = both[0];
+              if (!res.ok) { toast((await res.text()) || 'No se pudo generar el reporte', 'error'); return; }
+              this.rep = await res.json();
+              this.timings = both[1].ok ? await both[1].json() : null;
+              var self = this;
+              this.$nextTick(function () { self.drawCharts(); });
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            } finally {
+              this.loading = false;
+            }
+          },
+          // Barra proporcional al promedio más lento del periodo.
+          timingBar: function (a) {
+            var top = Math.max.apply(null, this.timings.areas.map(function (x) { return x.p90; }).concat([1]));
+            return { avg: Math.round(a.avg / top * 100), p90: Math.round(a.p90 / top * 100) };
+          },
+          mins: function (v) { return (Math.round(v * 10) / 10) + ' min'; },
+          get csvUrl() { return '/api/admin/reports/cuentas.csv?from=' + this.from + '&to=' + this.to; },
+
+          // --- formato ---
+          money: function (v) {
+            var n = Number(v || 0);
+            return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          },
+          compact: function (v) {
+            if (v >= 1e6) return '$' + (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + 'M';
+            if (v >= 1e3) return '$' + (v / 1e3).toFixed(v >= 1e4 ? 0 : 1) + 'K';
+            return '$' + Math.round(v);
+          },
+          int: function (v) { return Number(v || 0).toLocaleString('es-MX'); },
+          dayLabel: function (iso, long) {
+            var d = new Date(iso + 'T12:00:00');
+            return d.toLocaleDateString('es-MX', long ? { weekday: 'short', day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short' });
+          },
+          get rangeLabel() {
+            if (!this.rep) return '';
+            var r = this.rep.range;
+            return r.from === r.to ? this.dayLabel(r.from, true) : this.dayLabel(r.from) + ' – ' + this.dayLabel(r.to);
+          },
+          get prevLabel() {
+            if (!this.rep) return '';
+            var p = this.rep.previous;
+            return p.from === p.to ? this.dayLabel(p.from, true) : this.dayLabel(p.from) + ' – ' + this.dayLabel(p.to);
+          },
+          // Variación contra el periodo anterior. goodUp = subir es bueno.
+          delta: function (key, goodUp) {
+            if (!this.rep) return null;
+            var cur = this.rep.kpis[key], prev = this.rep.prev_kpis[key];
+            if (!prev) return cur ? { text: 'nuevo', cls: 'text-gray-500' } : null;
+            var pct = (cur - prev) / prev * 100;
+            if (Math.abs(pct) < 0.5) return { text: '= igual', cls: 'text-gray-500' };
+            var up = pct > 0, good = up === goodUp;
+            return { text: (up ? '▲ ' : '▼ ') + Math.abs(pct).toFixed(0) + '%', cls: good ? 'text-emerald-700' : 'text-rose-700' };
+          },
+          share: function (list, v) {
+            var max = Math.max.apply(null, list.map(function (x) { return x.amount; }).concat([0]));
+            return max ? (v / max * 100) + '%' : '0%';
+          },
+          get hoursWithSales() {
+            if (!this.rep) return [];
+            var hs = this.rep.hourly.filter(function (h) { return h.bills > 0; });
+            if (!hs.length) return [];
+            var a = hs[0].hour, b = hs[hs.length - 1].hour;
+            return this.rep.hourly.slice(a, b + 1);
+          },
+          get tipsTotal() {
+            return (this.rep && this.rep.tip_weeks || []).reduce(function (s, w) { return s + w.cash + w.other; }, 0);
+          },
+
+          drawCharts: function () {
+            var self = this, r = this.rep;
+            var daily = this.$refs.daily, hourly = this.$refs.hourly, tips = this.$refs.tips;
+            if (daily && r.daily.length > 1) {
+              columnChart(daily, {
+                title: 'Ventas por día',
+                series: [{ color: SERIES.blue }],
+                format: self.compact,
+                data: r.daily.map(function (d) {
+                  return { label: self.dayLabel(d.date), values: [d.sales],
+                    tip: [self.dayLabel(d.date, true), self.money(d.sales) + ' · ' + d.bills + ' cuenta(s)'] };
+                })
+              });
+            }
+            if (hourly) {
+              columnChart(hourly, {
+                title: 'Ventas por hora',
+                series: [{ color: SERIES.blue }],
+                format: self.compact,
+                data: self.hoursWithSales.map(function (h) {
+                  return { label: h.hour + 'h', values: [h.sales],
+                    tip: [h.hour + ':00 – ' + h.hour + ':59', self.money(h.sales) + ' · ' + h.bills + ' cuenta(s)'] };
+                })
+              });
+            }
+            if (tips && r.tip_weeks && r.tip_weeks.length) {
+              columnChart(tips, {
+                title: 'Propinas por semana',
+                height: 180,
+                series: [{ name: 'Efectivo', color: SERIES.blue }, { name: 'Tarjeta y otros', color: SERIES.orange }],
+                format: self.compact,
+                data: r.tip_weeks.map(function (w) {
+                  return { label: self.dayLabel(w.week_start), values: [w.cash, w.other],
+                    tip: ['Semana del ' + self.dayLabel(w.week_start, true), 'Efectivo ' + self.money(w.cash),
+                      'Tarjeta y otros ' + self.money(w.other), 'Total ' + self.money(w.cash + w.other)] };
+                })
+              });
+            }
+          },
+          toggleTable: function (key) {
+            this.tables[key] = !this.tables[key];
+            var self = this;
+            if (!this.tables[key]) this.$nextTick(function () { self.drawCharts(); });
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>
+      [x-cloak] { display: none !important; }
+      /* Las tarjetas del reporte pueden encogerse aunque tengan gráficas o tablas. */
+      main section { min-width: 0; }
+    </style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased" x-data="reportsApp()">
+    {{template "admin_nav" .}}
+
+    <main class="max-w-6xl mx-auto p-4 md:p-6 space-y-5">
+      <!-- Filtros: una sola fila -->
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="flex flex-wrap bg-white border border-gray-200 rounded-xl p-1 gap-1">
+          <template x-for="p in presets" :key="p.key">
+            <button @click="setPreset(p.key)"
+              :class="preset === p.key ? 'bg-slate-900 text-white font-bold' : 'text-gray-600 hover:bg-gray-100'"
+              class="px-3 py-1.5 rounded-lg text-xs transition" x-text="p.label"></button>
+          </template>
+        </div>
+        <div class="flex items-center gap-1 bg-white border border-gray-200 rounded-xl px-2 py-1" :class="preset === 'custom' && 'ring-2 ring-slate-900'">
+          <input type="date" x-model="from" @change="custom()" class="text-xs p-1 rounded focus:outline-none" />
+          <span class="text-gray-400 text-xs">→</span>
+          <input type="date" x-model="to" @change="custom()" class="text-xs p-1 rounded focus:outline-none" />
+        </div>
+        <span x-show="loading" class="text-xs text-gray-400">Cargando…</span>
+        <a :href="csvUrl" class="ml-auto px-3 py-2 rounded-xl text-xs font-bold bg-white border border-gray-200 hover:border-gray-400 text-gray-800">
+          ⬇️ Cuentas en CSV
+        </a>
+      </div>
+
+      <template x-if="rep">
+        <div class="space-y-5">
+          <!-- Indicadores -->
+          <section class="grid grid-cols-2 lg:grid-cols-6 gap-3">
+            <div class="col-span-2 bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <p class="text-xs font-semibold text-gray-500">Ventas · <span x-text="rangeLabel"></span></p>
+              <p class="text-5xl font-black text-gray-900 mt-1 tracking-tight" x-text="money(rep.kpis.sales)"></p>
+              <p class="text-xs mt-2">
+                <span class="font-bold" :class="delta('sales', true) && delta('sales', true).cls" x-text="delta('sales', true) ? delta('sales', true).text : '—'"></span>
+                <span class="text-gray-400">vs <span x-text="prevLabel"></span> (<span x-text="money(rep.prev_kpis.sales)"></span>)</span>
+              </p>
+              <p class="text-[11px] text-gray-400 mt-1">Total de cuentas cobradas, sin propina. IVA incluido: <span x-text="money(rep.kpis.tax)"></span></p>
+            </div>
+            <template x-for="t in [
+                { k: 'bills', label: 'Cuentas', val: int(rep.kpis.bills), up: true },
+                { k: 'avg_ticket', label: 'Ticket promedio', val: money(rep.kpis.avg_ticket), up: true },
+                { k: 'tips', label: 'Propinas', val: money(rep.kpis.tips), up: true },
+                { k: 'discounts', label: 'Descuentos', val: money(rep.kpis.discounts), up: false }
+              ]" :key="t.k">
+              <div class="bg-white rounded-2xl border border-gray-200 shadow-sm p-4">
+                <p class="text-xs font-semibold text-gray-500" x-text="t.label"></p>
+                <p class="text-2xl font-black text-gray-900 mt-1" x-text="t.val"></p>
+                <p class="text-[11px] font-bold mt-1" :class="delta(t.k, t.up) && delta(t.k, t.up).cls" x-text="delta(t.k, t.up) ? delta(t.k, t.up).text : '—'"></p>
+              </div>
+            </template>
+          </section>
+
+          <p x-show="rep.kpis.bills === 0" class="bg-white rounded-2xl border border-gray-200 p-8 text-center text-sm text-gray-400">
+            No hay cuentas cobradas en este periodo.
+          </p>
+
+          <div x-show="rep.kpis.bills > 0" class="grid lg:grid-cols-2 gap-5">
+            <!-- Ventas por día -->
+            <section x-show="rep.daily.length > 1" class="lg:col-span-2 bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <div class="flex justify-between items-baseline mb-3">
+                <h2 class="text-sm font-black text-gray-900">Ventas por día</h2>
+                <button @click="toggleTable('daily')" class="text-xs font-semibold text-slate-500 hover:text-slate-900" x-text="tables.daily ? 'Ver gráfica' : 'Ver tabla'"></button>
+              </div>
+              <div x-show="!tables.daily" x-ref="daily" class="w-full"></div>
+              <div x-show="tables.daily" class="max-h-72 overflow-y-auto">
+                <table class="w-full text-xs">
+                  <template x-for="d in rep.daily" :key="d.date">
+                    <tr class="border-b border-gray-50"><td class="py-1 capitalize" x-text="dayLabel(d.date, true)"></td><td class="text-right font-mono" x-text="d.bills + ' cuentas'"></td><td class="text-right font-mono font-bold" x-text="money(d.sales)"></td></tr>
+                  </template>
+                </table>
+              </div>
+            </section>
+
+            <!-- Ventas por hora -->
+            <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <div class="flex justify-between items-baseline mb-1">
+                <h2 class="text-sm font-black text-gray-900">Ventas por hora</h2>
+                <button @click="toggleTable('hourly')" class="text-xs font-semibold text-slate-500 hover:text-slate-900" x-text="tables.hourly ? 'Ver gráfica' : 'Ver tabla'"></button>
+              </div>
+              <p class="text-[11px] text-gray-400 mb-3" x-text="rep.range.days > 1 ? 'Suma de todos los días del periodo: muestra las horas pico.' : 'A qué hora se cobró.'"></p>
+              <div x-show="!tables.hourly" x-ref="hourly" class="w-full"></div>
+              <table x-show="tables.hourly" class="w-full text-xs">
+                <template x-for="h in hoursWithSales" :key="h.hour">
+                  <tr class="border-b border-gray-50"><td class="py-1" x-text="h.hour + ':00'"></td><td class="text-right font-mono" x-text="h.bills + ' cuentas'"></td><td class="text-right font-mono font-bold" x-text="money(h.sales)"></td></tr>
+                </template>
+              </table>
+            </section>
+
+            <!-- Métodos de pago -->
+            <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <h2 class="text-sm font-black text-gray-900">Métodos de pago</h2>
+              <p class="text-[11px] text-gray-400 mb-3">Lo cobrado con cada método, propinas incluidas.</p>
+              <div class="space-y-3">
+                <template x-for="m in rep.methods" :key="m.key">
+                  <div>
+                    <div class="flex justify-between text-xs mb-1">
+                      <span class="font-semibold text-gray-800" x-text="m.label + ' · ' + m.count + ' pago(s)'"></span>
+                      <span class="font-mono font-bold text-gray-900" x-text="money(m.amount)"></span>
+                    </div>
+                    <div class="h-2 bg-gray-100 rounded-full"><div class="h-2 rounded-full" :style="'background:#2a78d6;width:' + share(rep.methods, m.amount)"></div></div>
+                    <p x-show="m.tips > 0" class="text-[11px] text-gray-400 mt-0.5" x-text="'de propina: ' + money(m.tips)"></p>
+                  </div>
+                </template>
+              </div>
+            </section>
+
+            <!-- Categorías -->
+            <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <h2 class="text-sm font-black text-gray-900">Por categoría</h2>
+              <p class="text-[11px] text-gray-400 mb-3">Importe de los productos antes de descuentos.</p>
+              <div class="space-y-3">
+                <template x-for="c in rep.categories" :key="c.key">
+                  <div>
+                    <div class="flex justify-between text-xs mb-1">
+                      <span class="font-semibold text-gray-800 flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full" :style="'background:' + (c.color || '#9ca3af')"></span>
+                        <span x-text="c.label + ' · ' + c.quantity + ' pza'"></span>
+                      </span>
+                      <span class="font-mono font-bold text-gray-900" x-text="money(c.amount)"></span>
+                    </div>
+                    <div class="h-2 bg-gray-100 rounded-full"><div class="h-2 rounded-full" :style="'background:#2a78d6;width:' + share(rep.categories, c.amount)"></div></div>
+                  </div>
+                </template>
+              </div>
+            </section>
+
+            <!-- Tipo de venta -->
+            <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <h2 class="text-sm font-black text-gray-900 mb-3">Por tipo de venta</h2>
+              <div class="space-y-3">
+                <template x-for="t in rep.order_types" :key="t.key">
+                  <div>
+                    <div class="flex justify-between text-xs mb-1">
+                      <span class="font-semibold text-gray-800" x-text="t.label + ' · ' + t.count + ' cuenta(s)'"></span>
+                      <span class="font-mono font-bold text-gray-900" x-text="money(t.amount)"></span>
+                    </div>
+                    <div class="h-2 bg-gray-100 rounded-full"><div class="h-2 rounded-full" :style="'background:#2a78d6;width:' + share(rep.order_types, t.amount)"></div></div>
+                  </div>
+                </template>
+              </div>
+            </section>
+
+            <!-- Productos -->
+            <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 lg:row-span-2">
+              <h2 class="text-sm font-black text-gray-900 mb-3">Productos más vendidos</h2>
+              <table class="w-full text-xs">
+                <tr class="text-[10px] uppercase tracking-wider text-gray-400">
+                  <th class="text-left font-bold pb-1">Producto</th><th class="text-right font-bold pb-1">Pzas</th><th class="text-right font-bold pb-1">Importe</th>
+                </tr>
+                <template x-for="(p, i) in rep.products" :key="p.key">
+                  <tr class="border-t border-gray-50">
+                    <td class="py-1.5 pr-2">
+                      <p class="font-semibold text-gray-800"><span class="text-gray-400 font-mono mr-1" x-text="(i + 1) + '.'"></span><span x-text="p.label"></span></p>
+                      <p class="text-[10px] text-gray-400" x-text="p.category"></p>
+                    </td>
+                    <td class="text-right font-mono" x-text="p.quantity"></td>
+                    <td class="text-right font-mono font-bold" x-text="money(p.amount)"></td>
+                  </tr>
+                </template>
+              </table>
+            </section>
+
+            <!-- Propinas por semana -->
+            <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <div class="flex justify-between items-baseline">
+                <h2 class="text-sm font-black text-gray-900">Propinas por semana</h2>
+                <span class="text-xs font-mono font-bold text-gray-900" x-text="money(tipsTotal)"></span>
+              </div>
+              <p class="text-[11px] text-gray-400 mb-2">Semanas de lunes a domingo, para repartir con la nómina.</p>
+              <div x-show="rep.tip_weeks && rep.tip_weeks.length" class="flex gap-4 text-[11px] text-gray-600 mb-1">
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm" style="background:#2a78d6"></span>Efectivo</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm" style="background:#eb6834"></span>Tarjeta y otros</span>
+              </div>
+              <div x-show="rep.tip_weeks && rep.tip_weeks.length" x-ref="tips" class="w-full"></div>
+              <table x-show="rep.tip_weeks && rep.tip_weeks.length" class="w-full text-xs mt-2">
+                <template x-for="w in rep.tip_weeks" :key="w.week_start">
+                  <tr class="border-t border-gray-50">
+                    <td class="py-1" x-text="'Semana del ' + dayLabel(w.week_start)"></td>
+                    <td class="text-right font-mono text-gray-500" x-text="money(w.cash)"></td>
+                    <td class="text-right font-mono text-gray-500" x-text="money(w.other)"></td>
+                    <td class="text-right font-mono font-bold" x-text="money(w.cash + w.other)"></td>
+                  </tr>
+                </template>
+              </table>
+              <p x-show="!rep.tip_weeks || !rep.tip_weeks.length" class="text-xs text-gray-400 italic">Sin propinas en el periodo.</p>
+            </section>
+
+            <!-- Tiempos de salida -->
+            <section x-show="timings" class="lg:col-span-2 bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <div class="flex flex-wrap justify-between items-baseline gap-2 mb-1">
+                <h2 class="text-sm font-black text-gray-900">⏱️ Tiempos de salida por área</h2>
+                <p class="text-[11px] text-gray-400" x-show="timings">
+                  De que se pide a que se marca entregado en Expo ·
+                  <span x-text="timings && (timings.measured + ' de ' + timings.total + ' platillos medidos')"></span>
+                </p>
+              </div>
+              <template x-if="timings && timings.areas.length">
+                <div class="space-y-3 mt-3">
+                  <div class="flex gap-4 text-[11px] text-gray-500">
+                    <span><span class="inline-block w-3 h-2 rounded-sm align-middle mr-1" style="background:#2a78d6"></span>Promedio</span>
+                    <span><span class="inline-block w-3 h-2 rounded-sm align-middle mr-1" style="background:#b8d4f3"></span>9 de cada 10 salen antes de…</span>
+                  </div>
+                  <template x-for="a in timings.areas" :key="a.name">
+                    <div class="grid grid-cols-12 items-center gap-2 text-xs">
+                      <span class="col-span-3 font-semibold text-gray-800 truncate" x-text="a.name"></span>
+                      <div class="col-span-6 relative h-4 bg-gray-50 rounded" :title="'Mediana ' + mins(a.median) + ' · máximo ' + mins(a.max)">
+                        <div class="absolute inset-y-0 left-0 rounded" :style="'background:#b8d4f3;width:' + timingBar(a).p90 + '%'"></div>
+                        <div class="absolute inset-y-0.5 left-0 rounded" :style="'background:#2a78d6;width:' + timingBar(a).avg + '%'"></div>
+                      </div>
+                      <span class="col-span-3 text-right font-mono">
+                        <b class="text-gray-900" x-text="mins(a.avg)"></b>
+                        <span class="text-gray-400" x-text="' · ' + mins(a.p90)"></span>
+                        <span class="text-gray-400" x-text="' · ' + a.count + ' pzas'"></span>
+                      </span>
+                    </div>
+                  </template>
+                  <div x-show="timings.slowest.length" class="pt-3 border-t border-gray-100">
+                    <h3 class="text-[11px] font-black uppercase tracking-wider text-gray-500 mb-2">Platillos más tardados (promedio, mínimo 3 medidos)</h3>
+                    <table class="w-full text-xs">
+                      <template x-for="p in timings.slowest" :key="p.name + p.area">
+                        <tr class="border-t border-gray-50">
+                          <td class="py-1.5 font-semibold text-gray-800" x-text="p.name"></td>
+                          <td class="py-1.5 text-gray-400" x-text="p.area"></td>
+                          <td class="py-1.5 text-right font-mono"><b x-text="mins(p.avg)"></b> <span class="text-gray-400" x-text="'· ' + p.count + ' medidos'"></span></td>
+                        </tr>
+                      </template>
+                    </table>
+                  </div>
+                </div>
+              </template>
+              <p x-show="timings && !timings.areas.length" class="text-xs text-gray-400 italic mt-2">
+                Aún no hay platillos marcados como entregados en Expo en este periodo.
+              </p>
+              <p x-show="timings && (timings.unmarked || timings.outliers)" class="text-[11px] text-gray-400 mt-3">
+                <span x-show="timings && timings.unmarked" x-text="timings && (timings.unmarked + ' sin marcar en Expo')"></span>
+                <span x-show="timings && timings.outliers" x-text="timings && (' · ' + timings.outliers + ' marcados después de ' + timings.max_minutes + ' min (se excluyen: suelen ser olvidos)')"></span>.
+                Para medir bien, marca cada platillo en Expo cuando sale.
+              </p>
+            </section>
+
+            <!-- Control -->
+            <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <h2 class="text-sm font-black text-gray-900 mb-3">🛡️ Control</h2>
+              <dl class="text-xs divide-y divide-gray-50">
+                <div class="flex justify-between py-1.5"><dt class="text-gray-600">Órdenes cerradas sin pago</dt><dd class="font-mono"><span x-text="rep.control.cancellations"></span> · <b x-text="money(rep.control.cancelled_amount)"></b></dd></div>
+                <div class="flex justify-between py-1.5"><dt class="text-gray-600">Productos anulados</dt><dd class="font-mono"><span x-text="rep.control.voids"></span> · <b x-text="money(rep.control.voided_amount)"></b></dd></div>
+                <div class="flex justify-between py-1.5"><dt class="text-gray-600">Cuentas con descuento</dt><dd class="font-mono"><span x-text="rep.control.discounted_bills"></span> (<span x-text="rep.control.courtesies"></span> cortesías)</dd></div>
+                <div class="flex justify-between py-1.5"><dt class="text-gray-600">Aperturas manuales del cajón</dt><dd class="font-mono" x-text="rep.control.drawer_opens"></dd></div>
+                <div class="flex justify-between py-1.5"><dt class="text-gray-600">Turnos cerrados</dt><dd class="font-mono" x-text="rep.control.closed_shifts"></dd></div>
+                <div class="flex justify-between py-1.5">
+                  <dt class="text-gray-600">Diferencias de efectivo</dt>
+                  <dd class="font-mono">
+                    <span x-text="rep.control.shifts_with_cash_diff + ' turno(s) · '"></span>
+                    <b :class="rep.control.cash_diff_total < 0 ? 'text-rose-700' : ''" x-text="money(rep.control.cash_diff_total)"></b>
+                  </dd>
+                </div>
+              </dl>
+            </section>
+
+            <!-- Cortes -->
+            <section x-show="rep.shifts.length" class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+              <h2 class="text-sm font-black text-gray-900 mb-3">Cortes de caja</h2>
+              <table class="w-full text-xs">
+                <tr class="text-[10px] uppercase tracking-wider text-gray-400">
+                  <th class="text-left font-bold pb-1">Turno</th><th class="text-right font-bold pb-1">Efectivo</th><th class="text-right font-bold pb-1">Terminal</th><th></th>
+                </tr>
+                <template x-for="s in rep.shifts" :key="s.id">
+                  <tr class="border-t border-gray-50">
+                    <td class="py-1.5"><b x-text="'#' + s.id"></b> <span class="text-gray-400" x-text="s.closed_by"></span></td>
+                    <td class="text-right font-mono font-bold" :class="s.cash_diff < 0 ? 'text-rose-700' : (s.cash_diff > 0 ? 'text-amber-700' : 'text-emerald-700')"
+                      x-text="(s.cash_diff > 0 ? '+' : '') + money(s.cash_diff)"></td>
+                    <td class="text-right font-mono font-bold" :class="s.card_diff < 0 ? 'text-rose-700' : (s.card_diff > 0 ? 'text-amber-700' : 'text-emerald-700')"
+                      x-text="(s.card_diff > 0 ? '+' : '') + money(s.card_diff)"></td>
+                    <td class="text-right"><a :href="'/caja/turnos/' + s.id" class="font-bold text-slate-600 hover:underline">Ver →</a></td>
+                  </tr>
+                </template>
+              </table>
+            </section>
+          </div>
+        </div>
+      </template>
+    </main>
+  </body>
+</html>

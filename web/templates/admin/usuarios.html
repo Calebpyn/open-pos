@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Usuarios · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script>
+      var CURRENT_USER_ID = {{.User.ID}};
+
+      function usersApp() {
+        return {
+          users: [],
+          roles: [],
+          form: null,
+          error: '',
+          busy: false,
+          showInactive: false,
+          init: function () { this.load(); },
+          load: async function () {
+            var res = await fetch('/api/admin/users');
+            if (!res.ok) return;
+            var data = await res.json();
+            this.users = data.users;
+            this.roles = data.roles;
+          },
+          get visible() {
+            var all = this.showInactive;
+            return this.users.filter(function (u) { return all || u.is_active; });
+          },
+          roleColor: function (r) {
+            return { ADMIN: 'bg-slate-900 text-white', MANAGER: 'bg-sky-100 text-sky-800', CASHIER: 'bg-emerald-100 text-emerald-800', WAITER: 'bg-amber-100 text-amber-800' }[r];
+          },
+          edit: function (u) {
+            this.form = u
+              ? { id: u.id, name: u.name, role: u.role, is_active: u.is_active, pin: '', pin2: '' }
+              : { id: null, name: '', role: 'WAITER', is_active: true, pin: '', pin2: '' };
+            this.error = '';
+          },
+          save: async function () {
+            var f = this.form;
+            if (!f.id || f.pin) {
+              if (!/^[0-9]{4,6}$/.test(f.pin)) { this.error = 'El PIN debe tener de 4 a 6 dígitos'; return; }
+              if (f.pin !== f.pin2) { this.error = 'Los PIN no coinciden'; return; }
+            }
+            this.busy = true;
+            this.error = '';
+            try {
+              var res = await fetch(f.id ? '/api/admin/users/' + f.id : '/api/admin/users', {
+                method: f.id ? 'PUT' : 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: f.name, role: f.role, pin: f.pin, is_active: f.is_active })
+              });
+              if (!res.ok) { this.error = (await res.text()) || 'No se pudo guardar'; return; }
+              this.form = null;
+              toast('Usuario guardado');
+              if (f.id === CURRENT_USER_ID || f.pin) {
+                location.reload(); // el aviso del PIN genérico puede cambiar
+                return;
+              }
+              await this.load();
+            } catch (e) {
+              this.error = 'No se pudo conectar con el servidor';
+            } finally {
+              this.busy = false;
+            }
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased" x-data="usersApp()" @keydown.escape.window="form = null">
+    {{template "admin_nav" .}}
+
+    <main class="max-w-4xl mx-auto p-4 md:p-6 space-y-5">
+      <div class="flex justify-between items-center">
+        <div>
+          <h2 class="text-lg font-black text-gray-900">Usuarios</h2>
+          <p class="text-xs text-gray-500">Cada persona tiene su propio PIN; con él se firman cobros, cierres de caja y cancelaciones.</p>
+        </div>
+        <button @click="edit(null)" class="px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white">+ Usuario</button>
+      </div>
+
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+        <label class="flex items-center gap-2 text-xs text-gray-500 mb-2">
+          <input type="checkbox" x-model="showInactive" /> Mostrar dados de baja
+        </label>
+        <div class="divide-y divide-gray-100">
+          <template x-for="u in visible" :key="u.id">
+            <div class="flex items-center gap-3 py-3" :class="!u.is_active && 'opacity-50'">
+              <div class="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center font-black text-gray-600" x-text="u.name.charAt(0).toUpperCase()"></div>
+              <div class="flex-1 min-w-0">
+                <p class="font-bold text-gray-900">
+                  <span x-text="u.name"></span>
+                  <span x-show="u.id === CURRENT_USER_ID" class="text-[10px] text-gray-400 font-semibold">(tú)</span>
+                  <span x-show="!u.is_active" class="ml-1 text-[10px] uppercase bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded">Baja</span>
+                </p>
+              </div>
+              <span class="text-[11px] font-bold px-2 py-0.5 rounded-full" :class="roleColor(u.role)" x-text="u.role_label"></span>
+              <button @click="edit(u)" class="text-xs font-bold text-slate-600 hover:text-slate-900 px-2">Editar</button>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 text-xs text-gray-600">
+        <h3 class="text-sm font-black text-gray-900 mb-2">Qué puede hacer cada rol</h3>
+        <ul class="space-y-1">
+          <li><b>Administrador:</b> todo, incluido este panel (menú, precios, mesas, usuarios, dispositivos).</li>
+          <li><b>Encargado:</b> todo lo de caja; en siguientes fases autoriza cancelaciones y ve reportes.</li>
+          <li><b>Cajero:</b> abrir y cerrar turno, gastos, abrir cajón.</li>
+          <li><b>Mesero:</b> tomar órdenes; no puede operar la caja.</li>
+        </ul>
+      </section>
+    </main>
+
+    <div x-show="form" x-cloak @click.self="form = null" class="fixed inset-0 z-40 bg-slate-900/60 flex items-center justify-center p-4">
+      <template x-if="form">
+        <form @submit.prevent="save()" class="bg-white rounded-2xl w-full max-w-sm p-6 space-y-3 shadow-2xl">
+          <h2 class="text-lg font-black text-gray-900" x-text="form.id ? 'Editar usuario' : 'Nuevo usuario'"></h2>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Nombre</span>
+            <input type="text" x-model="form.name" class="mt-1 w-full p-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          </label>
+          <div>
+            <span class="text-xs font-bold text-gray-700">Rol</span>
+            <div class="grid grid-cols-2 gap-1.5 mt-1">
+              <template x-for="r in roles" :key="r.key">
+                <button type="button" @click="form.role = r.key"
+                  :class="form.role === r.key ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-gray-200 text-gray-700 hover:border-gray-400'"
+                  class="text-xs font-semibold px-3 py-2 rounded-xl border transition" x-text="r.label"></button>
+              </template>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="block">
+              <span class="text-xs font-bold text-gray-700" x-text="form.id ? 'Nuevo PIN (opcional)' : 'PIN'"></span>
+              <input type="password" inputmode="numeric" maxlength="6" autocomplete="new-password" x-model="form.pin"
+                class="mt-1 w-full p-2 font-mono tracking-widest border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+            </label>
+            <label class="block">
+              <span class="text-xs font-bold text-gray-700">Confirmar PIN</span>
+              <input type="password" inputmode="numeric" maxlength="6" autocomplete="new-password" x-model="form.pin2"
+                class="mt-1 w-full p-2 font-mono tracking-widest border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+            </label>
+          </div>
+          <label x-show="form.id" class="flex items-center gap-2 text-sm">
+            <input type="checkbox" x-model="form.is_active" /> Activo (desmarcado = dado de baja, su PIN deja de funcionar)
+          </label>
+          <p class="text-[11px] text-gray-400">Los usuarios no se borran: su historial de cobros y cierres se conserva.</p>
+          <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600"></p>
+          <div class="flex gap-2 pt-1">
+            <button type="button" @click="form = null" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+            <button type="submit" :disabled="busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">Guardar</button>
+          </div>
+        </form>
+      </template>
+    </div>
+  </body>
+</html>

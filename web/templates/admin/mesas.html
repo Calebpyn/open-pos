@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mesas · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script src="/static/js/floor.js"></script>
+    <script>
+      function tablesApp() {
+        return {
+          tables: [],
+          showArchived: false,
+          modal: null, // table | zone
+          form: null,
+          error: '',
+          busy: false,
+          view: (function () { try { return localStorage.getItem('opos.mesas.view') || 'plan'; } catch (e) { return 'plan'; } })(),
+          // Plano
+          zone: null,
+          items: [],
+          cell: 32,
+          drag: null, // { el, mode: move|resize, px, py, r, moved, bad }
+          sel: null, // clave del elemento seleccionado
+          init: function () {
+            var self = this;
+            this.load();
+            this.loadItems();
+            window.addEventListener('resize', function () { self.measure(); });
+          },
+          load: async function () {
+            var res = await fetch('/api/admin/tables');
+            if (res.ok) this.tables = await res.json();
+            if (this.allZones.indexOf(this.zone) === -1) this.zone = this.allZones[0] || null;
+            this.$nextTick(() => this.measure());
+          },
+          loadItems: async function () {
+            var res = await fetch('/api/admin/floor-items');
+            if (res.ok) this.items = await res.json();
+          },
+          setView: function (v) {
+            this.view = v;
+            try { localStorage.setItem('opos.mesas.view', v); } catch (e) {}
+            this.$nextTick(() => this.measure());
+          },
+
+          // --- Plano ---
+          key: function (el) { return (el.kind ? 'i' : 't') + el.id; },
+          elsInZone: function () {
+            var z = this.zone;
+            return this.tables.filter(function (t) { return t.is_active && t.zone === z; })
+              .concat(this.items.filter(function (it) { return it.zone === z; }));
+          },
+          // El lienzo siempre deja espacio libre a la derecha y abajo para crecer.
+          get grid() {
+            var cols = 20, rows = 12;
+            this.elsInZone().forEach(function (e) { cols = Math.max(cols, e.x + e.w + 4); rows = Math.max(rows, e.y + e.h + 4); });
+            return { cols: Math.min(cols, Floor.MAX_COLS), rows: Math.min(rows, Floor.MAX_ROWS) };
+          },
+          measure: function () {
+            var wrap = this.$refs.canvasWrap;
+            if (wrap && wrap.clientWidth) this.cell = Floor.cellFor(wrap.clientWidth - 24, this.grid.cols, 24, 48);
+          },
+          canvasStyle: function () {
+            var c = this.cell, g = this.grid;
+            return 'width:' + g.cols * c + 'px;height:' + g.rows * c + 'px;background-size:' + c + 'px ' + c + 'px;' +
+              'background-image:linear-gradient(to right,#e5e7eb 1px,transparent 1px),linear-gradient(to bottom,#e5e7eb 1px,transparent 1px)';
+          },
+          rectOf: function (el) {
+            var d = this.drag;
+            return d && this.key(d.el) === this.key(el) ? d.r : { x: el.x, y: el.y, w: el.w, h: el.h };
+          },
+          elStyle: function (el) {
+            var r = this.rectOf(el);
+            return Floor.box(r, this.cell, null, el.kind === 'WALL' ? 0 : 3) + ';font-size:' + Floor.fontFor(r, this.cell, 16) + 'px';
+          },
+          elClass: function (el) {
+            var c;
+            if (el.kind) c = Floor.KINDS[el.kind].cls + (el.kind === 'LABEL' ? ' border border-dashed border-gray-300 rounded' : '');
+            else c = (el.shape === 'ROUND' ? 'rounded-full' : 'rounded-xl') + ' bg-emerald-50 border-2 border-emerald-300 text-emerald-900';
+            var d = this.drag;
+            if (d && this.key(d.el) === this.key(el)) c += ' z-20 shadow-lg opacity-90' + (d.bad ? ' !bg-rose-100 !border-rose-400 !text-rose-800' : '');
+            else if (this.sel === this.key(el)) c += ' z-10 ring-2 ring-sky-500 ring-offset-1';
+            return c;
+          },
+          blocked: function (el, r) {
+            var k = this.key(el), self = this;
+            return !Floor.inBounds(r) || this.elsInZone().some(function (o) { return self.key(o) !== k && Floor.overlaps(r, o); });
+          },
+          down: function (e, el, mode) {
+            if (e.button > 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            this.drag = { el: el, mode: mode, px: e.clientX, py: e.clientY, r: { x: el.x, y: el.y, w: el.w, h: el.h }, moved: false, bad: false };
+          },
+          move: function (e) {
+            var d = this.drag;
+            if (!d) return;
+            var dx = e.clientX - d.px, dy = e.clientY - d.py, el = d.el;
+            if (Math.abs(dx) + Math.abs(dy) > 4) d.moved = true;
+            var cx = Math.round(dx / this.cell), cy = Math.round(dy / this.cell), M = Floor;
+            var r = d.mode === 'move'
+              ? { x: Math.max(0, Math.min(M.MAX_COLS - el.w, el.x + cx)), y: Math.max(0, Math.min(M.MAX_ROWS - el.h, el.y + cy)), w: el.w, h: el.h }
+              : { x: el.x, y: el.y, w: Math.max(1, Math.min(M.MAX_SIZE, el.w + cx)), h: Math.max(1, Math.min(M.MAX_SIZE, el.h + cy)) };
+            if (r.x !== d.r.x || r.y !== d.r.y || r.w !== d.r.w || r.h !== d.r.h) {
+              d.r = r;
+              d.bad = this.blocked(el, r);
+            }
+          },
+          up: function () {
+            var d = this.drag;
+            if (!d) return;
+            this.drag = null;
+            if (!d.moved) { this.sel = this.key(d.el); return; }
+            this.sel = this.key(d.el);
+            if (d.bad) { toast('Ese lugar ya está ocupado', 'warn'); return; }
+            var el = d.el, r = d.r;
+            if (r.x === el.x && r.y === el.y && r.w === el.w && r.h === el.h) return;
+            this.commit(el, r);
+          },
+          // Guarda posición, tamaño, forma o texto; si el servidor lo rechaza, regresa como estaba.
+          commit: async function (el, r, extra) {
+            var prev = { x: el.x, y: el.y, w: el.w, h: el.h, shape: el.shape, label: el.label };
+            Object.assign(el, r, extra || {});
+            var out = el.kind
+              ? await this.request('PUT', '/api/admin/floor-items/' + el.id, { zone: el.zone, kind: el.kind, label: el.label, x: el.x, y: el.y, w: el.w, h: el.h })
+              : await this.request('PUT', '/api/admin/tables/' + el.id + '/layout', { x: el.x, y: el.y, w: el.w, h: el.h, shape: el.shape });
+            if (!out) {
+              Object.assign(el, prev);
+              toast(this.error, 'warn');
+              return;
+            }
+            this.measure();
+          },
+          get selEl() {
+            var k = this.sel, self = this;
+            return this.elsInZone().find(function (e) { return self.key(e) === k; }) || null;
+          },
+          rotate: function () {
+            var el = this.selEl;
+            if (!el) return;
+            var r = { x: el.x, y: el.y, w: el.h, h: el.w };
+            if (this.blocked(el, r)) { toast('No hay espacio para girarlo ahí', 'warn'); return; }
+            this.commit(el, r);
+          },
+          resizeBy: function (dw, dh) {
+            var el = this.selEl;
+            if (!el) return;
+            var r = { x: el.x, y: el.y, w: el.w + dw, h: el.h + dh };
+            if (r.w < 1 || r.h < 1 || r.w > Floor.MAX_SIZE || r.h > Floor.MAX_SIZE) return;
+            if (this.blocked(el, r)) { toast('No hay espacio para agrandarlo', 'warn'); return; }
+            this.commit(el, r);
+          },
+          nudge: function (dx, dy) {
+            var el = this.selEl;
+            if (!el) return;
+            var r = { x: el.x + dx, y: el.y + dy, w: el.w, h: el.h };
+            if (!this.blocked(el, r)) this.commit(el, r);
+          },
+          setShape: function (shape) {
+            var el = this.selEl;
+            if (el && el.shape !== shape) this.commit(el, { x: el.x, y: el.y, w: el.w, h: el.h }, { shape: shape });
+          },
+          setLabel: function (label) {
+            var el = this.selEl;
+            if (el && el.label !== label.trim()) this.commit(el, { x: el.x, y: el.y, w: el.w, h: el.h }, { label: label.trim() });
+          },
+          addItem: async function (kind) {
+            if (!this.zone) return;
+            var out = await this.request('POST', '/api/admin/floor-items', { zone: this.zone, kind: kind });
+            if (!out) { toast(this.error, 'warn'); return; }
+            this.items.push(out.item);
+            this.sel = this.key(out.item);
+            this.$nextTick(() => this.measure());
+          },
+          deleteItem: async function () {
+            var el = this.selEl;
+            if (!el || !el.kind) return;
+            if (!(await this.request('DELETE', '/api/admin/floor-items/' + el.id))) { toast(this.error, 'warn'); return; }
+            this.items = this.items.filter(function (it) { return it.id !== el.id; });
+            this.sel = null;
+          },
+          onKey: function (e) {
+            if (this.view !== 'plan' || this.modal || !this.sel) return;
+            if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+            var moves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+            if (moves[e.key]) { e.preventDefault(); this.nudge(moves[e.key][0], moves[e.key][1]); }
+            else if ((e.key === 'Delete' || e.key === 'Backspace') && this.selEl && this.selEl.kind) { e.preventDefault(); this.deleteItem(); }
+            else if (e.key === 'Escape') this.sel = null;
+          },
+          get visibleTables() {
+            var all = this.showArchived;
+            return this.tables.filter(function (t) { return all || t.is_active; });
+          },
+          // Zonas en el orden de su primera mesa; una zona sin mesas activas
+          // solo se ve con "Mostrar archivadas".
+          get zones() {
+            var seen = [];
+            this.visibleTables.forEach(function (t) { if (seen.indexOf(t.zone) === -1) seen.push(t.zone); });
+            return seen;
+          },
+          get allZones() {
+            var seen = [];
+            this.tables.forEach(function (t) { if (t.is_active && seen.indexOf(t.zone) === -1) seen.push(t.zone); });
+            return seen;
+          },
+          inZone: function (z) { return this.visibleTables.filter(function (t) { return t.zone === z; }); },
+          activeIn: function (z) { return this.tables.filter(function (t) { return t.zone === z && t.is_active; }).length; },
+
+          request: async function (method, url, body) {
+            this.busy = true;
+            this.error = '';
+            try {
+              var res = await fetch(url, {
+                method: method,
+                headers: { 'Content-Type': 'application/json' },
+                body: body === undefined ? undefined : JSON.stringify(body)
+              });
+              if (!res.ok) { this.error = (await res.text()) || 'No se pudo guardar'; return null; }
+              return await res.json();
+            } catch (e) {
+              this.error = 'No se pudo conectar con el servidor';
+              return null;
+            } finally {
+              this.busy = false;
+            }
+          },
+
+          editTable: function (t, zone) {
+            this.form = t
+              ? Object.assign({}, t)
+              : { id: null, name: '', zone: zone || this.allZones[0] || 'Interior', sort_order: (this.tables.length + 1) * 10, is_active: true };
+            this.error = '';
+            this.modal = 'table';
+          },
+          saveTable: async function () {
+            var f = this.form;
+            var out = await this.request(f.id ? 'PUT' : 'POST', f.id ? '/api/admin/tables/' + f.id : '/api/admin/tables',
+              Object.assign({}, f, { sort_order: Number(f.sort_order) || 0 }));
+            if (!out) return;
+            this.modal = null;
+            toast('Mesa guardada');
+            await this.load();
+            if (!f.id && out.table) { this.zone = out.table.zone; this.sel = 't' + out.table.id; }
+          },
+
+          editZone: function (z) {
+            this.form = { zone: z, to: z };
+            this.error = '';
+            this.modal = 'zone';
+          },
+          renameZone: async function () {
+            var f = this.form;
+            if (!f.to.trim() || f.to.trim() === f.zone) { this.modal = null; return; }
+            var merge = this.allZones.indexOf(f.to.trim()) !== -1;
+            if (!(await this.request('POST', '/api/admin/zones/rename', { zone: f.zone, to: f.to }))) return;
+            this.modal = null;
+            toast(merge ? 'Zonas unidas en “' + f.to.trim() + '”' : 'Zona renombrada');
+            if (this.zone === f.zone) this.zone = f.to.trim();
+            await this.load();
+            await this.loadItems();
+          },
+          archiveZone: async function (z) {
+            if (!confirm('¿Archivar la zona “' + z + '” y sus ' + this.activeIn(z) + ' mesa(s)? Dejarán de aparecer en el POS.')) return;
+            var out = await this.request('POST', '/api/admin/zones/archive', { zone: z });
+            if (!out) { toast(this.error, 'error'); return; }
+            toast('Zona “' + z + '” archivada');
+            await this.load();
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased" x-data="tablesApp()" @keydown.escape.window="modal = null" @keydown.window="onKey($event)">
+    {{template "admin_nav" .}}
+
+    <main class="max-w-5xl mx-auto p-4 md:p-6 space-y-5">
+      <div class="flex flex-wrap justify-between items-center gap-3">
+        <div>
+          <h2 class="text-lg font-black text-gray-900">Mesas y zonas</h2>
+          <p class="text-xs text-gray-500">Para crear una zona nueva, agrega una mesa y escribe el nombre de la zona.</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <div class="flex bg-gray-200 p-1 rounded-xl gap-1">
+            <button @click="setView('plan')" :class="view === 'plan' ? 'bg-white shadow text-slate-900 font-bold' : 'text-gray-600'" class="px-3 py-1.5 rounded-lg text-xs">🗺️ Plano</button>
+            <button @click="setView('list')" :class="view === 'list' ? 'bg-white shadow text-slate-900 font-bold' : 'text-gray-600'" class="px-3 py-1.5 rounded-lg text-xs">☰ Lista</button>
+          </div>
+          <label x-show="view === 'list'" class="flex items-center gap-2 text-xs text-gray-500">
+            <input type="checkbox" x-model="showArchived" /> Mostrar archivadas
+          </label>
+          <button @click="editTable(null, view === 'plan' ? zone : null)" class="px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white">+ Mesa</button>
+        </div>
+      </div>
+
+      <p x-show="zones.length === 0" x-cloak class="text-sm text-gray-400 text-center py-10">No hay mesas activas.</p>
+
+      <!-- Plano -->
+      <section x-show="view === 'plan' && zone" x-cloak class="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="flex flex-wrap gap-1.5">
+            <template x-for="z in allZones" :key="z">
+              <button @click="zone = z; sel = null; $nextTick(() => measure())"
+                :class="zone === z ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-gray-700 border-gray-200 hover:border-gray-400'"
+                class="text-xs font-bold px-3 py-1.5 rounded-lg border" x-text="z"></button>
+            </template>
+          </div>
+          <div class="flex flex-wrap gap-1.5 text-xs font-bold">
+            <button @click="addItem('WALL')" class="px-2.5 py-1.5 rounded-lg border border-gray-200 hover:border-gray-400">+ Pared</button>
+            <button @click="addItem('COUNTER')" class="px-2.5 py-1.5 rounded-lg border border-gray-200 hover:border-gray-400">+ Barra</button>
+            <button @click="addItem('DOOR')" class="px-2.5 py-1.5 rounded-lg border border-gray-200 hover:border-gray-400">+ Puerta</button>
+            <button @click="addItem('LABEL')" class="px-2.5 py-1.5 rounded-lg border border-gray-200 hover:border-gray-400">+ Texto</button>
+          </div>
+        </div>
+
+        <div x-ref="canvasWrap" class="overflow-auto rounded-xl bg-gray-50 border border-gray-200 p-3">
+          <div class="relative select-none" :style="canvasStyle()" @pointerdown.self="sel = null">
+            <template x-for="el in elsInZone()" :key="key(el)">
+              <div class="absolute flex items-center justify-center text-center touch-none cursor-grab active:cursor-grabbing"
+                :class="elClass(el)" :style="elStyle(el)"
+                @pointerdown="down($event, el, 'move')" @pointermove="move($event)" @pointerup="up()" @pointercancel="drag = null">
+                <span class="font-black leading-tight px-1 pointer-events-none break-words" x-text="el.kind ? el.label : el.name"></span>
+                <div x-show="sel === key(el) && !drag" title="Arrastra para cambiar el tamaño"
+                  class="absolute -right-2 -bottom-2 w-5 h-5 bg-sky-500 border-2 border-white rounded-md shadow cursor-se-resize touch-none"
+                  @pointerdown="down($event, el, 'resize')" @pointermove="move($event)" @pointerup="up()"></div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Elemento seleccionado -->
+        <div class="min-h-[52px] flex flex-wrap items-center gap-2 text-xs">
+          <template x-if="!selEl">
+            <p class="text-gray-400">Arrastra para mover (se acomoda en la cuadrícula). Toca un elemento para seleccionarlo; la esquina azul cambia su tamaño. Con teclado: flechas para mover.</p>
+          </template>
+          <template x-if="selEl && !selEl.kind">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-black text-sm text-gray-900" x-text="selEl.name"></span>
+              <span class="text-gray-400 font-mono" x-text="selEl.w + '×' + selEl.h"></span>
+              <div class="flex bg-gray-100 p-0.5 rounded-lg">
+                <button @click="setShape('SQUARE')" :class="selEl.shape !== 'ROUND' ? 'bg-white shadow font-bold' : 'text-gray-500'" class="px-2.5 py-1 rounded-md">▢ Cuadrada</button>
+                <button @click="setShape('ROUND')" :class="selEl.shape === 'ROUND' ? 'bg-white shadow font-bold' : 'text-gray-500'" class="px-2.5 py-1 rounded-md">◯ Redonda</button>
+              </div>
+              <button @click="resizeBy(-1, 0)" class="px-2 py-1 rounded-lg border border-gray-200">Ancho −</button>
+              <button @click="resizeBy(1, 0)" class="px-2 py-1 rounded-lg border border-gray-200">Ancho +</button>
+              <button @click="resizeBy(0, -1)" class="px-2 py-1 rounded-lg border border-gray-200">Alto −</button>
+              <button @click="resizeBy(0, 1)" class="px-2 py-1 rounded-lg border border-gray-200">Alto +</button>
+              <button @click="rotate()" class="px-2 py-1 rounded-lg border border-gray-200">⟳ Girar</button>
+              <button @click="editTable(selEl)" class="px-2.5 py-1 rounded-lg bg-slate-900 text-white font-bold">Editar mesa</button>
+            </div>
+          </template>
+          <template x-if="selEl && selEl.kind">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-black text-sm text-gray-900" x-text="Floor.KINDS[selEl.kind].name"></span>
+              <input x-show="selEl.kind !== 'WALL'" type="text" maxlength="40" :value="selEl.label" @change="setLabel($event.target.value)"
+                placeholder="Texto" class="w-40 p-1.5 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+              <button @click="resizeBy(-1, 0)" class="px-2 py-1 rounded-lg border border-gray-200">Ancho −</button>
+              <button @click="resizeBy(1, 0)" class="px-2 py-1 rounded-lg border border-gray-200">Ancho +</button>
+              <button @click="resizeBy(0, -1)" class="px-2 py-1 rounded-lg border border-gray-200">Alto −</button>
+              <button @click="resizeBy(0, 1)" class="px-2 py-1 rounded-lg border border-gray-200">Alto +</button>
+              <button @click="rotate()" class="px-2 py-1 rounded-lg border border-gray-200">⟳ Girar</button>
+              <button @click="deleteItem()" class="px-2.5 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 font-bold">Quitar</button>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <template x-for="z in (view === 'list' ? zones : [])" :key="z">
+        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+          <div class="flex flex-wrap justify-between items-center gap-2 mb-3">
+            <h3 class="text-sm font-black uppercase tracking-wider text-gray-700">
+              <span x-text="z"></span>
+              <span class="ml-1 text-[11px] font-semibold normal-case tracking-normal text-gray-400"
+                x-text="activeIn(z) === 0 ? '· archivada' : '· ' + activeIn(z) + ' mesa(s)'"></span>
+            </h3>
+            <div class="flex gap-3 text-xs font-bold">
+              <button @click="editTable(null, z)" class="text-emerald-700 hover:underline">+ Mesa aquí</button>
+              <button @click="editZone(z)" class="text-slate-600 hover:underline">Renombrar</button>
+              <button x-show="activeIn(z) > 0" @click="archiveZone(z)" class="text-rose-600 hover:underline">Archivar zona</button>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+            <template x-for="t in inZone(z)" :key="t.id">
+              <button
+                @click="editTable(t)"
+                :class="!t.is_active ? 'bg-gray-50 border-dashed text-gray-400' : (t.status === 'OCCUPIED' ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200')"
+                class="border-2 rounded-2xl p-4 text-left hover:shadow transition"
+              >
+                <p class="text-lg font-black" x-text="t.name"></p>
+                <p class="text-[11px] font-semibold"
+                  x-text="!t.is_active ? 'Archivada' : (t.status === 'OCCUPIED' ? 'Ocupada' : 'Libre')"></p>
+              </button>
+            </template>
+          </div>
+        </section>
+      </template>
+    </main>
+
+    <div x-show="modal" x-cloak @click.self="modal = null" class="fixed inset-0 z-40 bg-slate-900/60 flex items-center justify-center p-4">
+      <!-- Mesa -->
+      <template x-if="modal === 'table'">
+        <form @submit.prevent="saveTable()" class="bg-white rounded-2xl w-full max-w-sm p-6 space-y-3 shadow-2xl">
+          <h2 class="text-lg font-black text-gray-900" x-text="form.id ? 'Editar mesa' : 'Nueva mesa'"></h2>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Nombre</span>
+            <input type="text" x-model="form.name" placeholder="Ej. Mesa 5, Terraza 2" class="mt-1 w-full p-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          </label>
+          <div>
+            <span class="text-xs font-bold text-gray-700">Zona</span>
+            <div class="flex flex-wrap gap-1.5 mt-1">
+              <template x-for="z in allZones" :key="z">
+                <button type="button" @click="form.zone = z"
+                  :class="form.zone === z ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-gray-700 border-gray-200 hover:border-gray-400'"
+                  class="text-xs font-semibold px-3 py-1.5 rounded-lg border" x-text="z"></button>
+              </template>
+            </div>
+            <input type="text" x-model="form.zone" placeholder="…o escribe una zona nueva"
+              class="mt-2 w-full p-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          </div>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Orden</span>
+            <input type="number" x-model="form.sort_order" class="mt-1 w-full p-2 border border-gray-200 rounded-lg" />
+          </label>
+          <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" x-model="form.is_active" /> Activa (desmarcada = archivada, no aparece en el POS)
+          </label>
+          <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600"></p>
+          <div class="flex gap-2 pt-1">
+            <button type="button" @click="modal = null" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+            <button type="submit" :disabled="busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">Guardar</button>
+          </div>
+        </form>
+      </template>
+
+      <!-- Zona -->
+      <template x-if="modal === 'zone'">
+        <form @submit.prevent="renameZone()" class="bg-white rounded-2xl w-full max-w-sm p-6 space-y-3 shadow-2xl">
+          <h2 class="text-lg font-black text-gray-900">Renombrar zona</h2>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Nombre nuevo de “<span x-text="form.zone"></span>”</span>
+            <input type="text" x-model="form.to" class="mt-1 w-full p-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          </label>
+          <p x-show="form.to.trim() !== form.zone && allZones.indexOf(form.to.trim()) !== -1"
+            class="text-xs bg-amber-50 border border-amber-200 text-amber-900 rounded-lg px-3 py-2">
+            Ya existe una zona con ese nombre: las mesas de las dos zonas quedarán juntas.
+          </p>
+          <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600"></p>
+          <div class="flex gap-2 pt-1">
+            <button type="button" @click="modal = null" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+            <button type="submit" :disabled="busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">Guardar</button>
+          </div>
+        </form>
+      </template>
+    </div>
+  </body>
+</html>

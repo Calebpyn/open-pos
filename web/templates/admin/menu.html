@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Menú · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script>
+      function menuApp() {
+        return {
+          tab: 'productos',
+          categories: [],
+          products: [],
+          areas: [],
+          groups: [],
+          selected: null, // id de categoría
+          showArchived: false,
+          modal: null, // category | product | group | area
+          form: {},
+          error: '',
+          busy: false,
+
+          init: function () {
+            try { this.tab = sessionStorage.getItem('open-pos:menu-tab') || 'productos'; } catch (e) {}
+            this.$watch('tab', function (t) { try { sessionStorage.setItem('open-pos:menu-tab', t); } catch (e) {} });
+            this.load();
+          },
+          load: async function () {
+            var res = await fetch('/api/admin/menu');
+            if (!res.ok) { toast('No se pudo cargar el menú', 'error'); return; }
+            var d = await res.json();
+            this.categories = d.categories;
+            this.products = d.products;
+            this.areas = d.areas;
+            this.groups = d.modifier_groups;
+            if (!this.selected && this.categories.length) this.selected = this.categories[0].id;
+          },
+          fmt: function (v) {
+            return '$' + Number(v || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          },
+          byId: function (list, id) { return list.find(function (x) { return x.id === id; }); },
+
+          // --- categorías (un nivel de subcategorías) ---
+          get topCategories() { return this.categories.filter(function (c) { return !c.parent_id; }); },
+          childrenOf: function (id) { return this.categories.filter(function (c) { return c.parent_id === id; }); },
+          get categoryTree() {
+            var self = this, out = [];
+            this.topCategories.forEach(function (c) {
+              out.push({ cat: c, depth: 0 });
+              self.childrenOf(c.id).forEach(function (s) { out.push({ cat: s, depth: 1 }); });
+            });
+            return out;
+          },
+          categoryPath: function (id) {
+            var c = this.byId(this.categories, id);
+            if (!c) return '';
+            var p = c.parent_id && this.byId(this.categories, c.parent_id);
+            return p ? p.name + ' › ' + c.name : c.name;
+          },
+          get category() { return this.byId(this.categories, this.selected); },
+          get visibleProducts() {
+            var self = this;
+            return this.products.filter(function (p) {
+              return p.category_id === self.selected && (self.showArchived || p.is_active);
+            });
+          },
+          count: function (catId) {
+            return this.products.filter(function (p) { return p.category_id === catId && p.is_active; }).length;
+          },
+          area: function (id) { return id ? this.byId(this.areas, id) : null; },
+          groupNames: function (p) {
+            var self = this;
+            return p.modifier_group_ids.map(function (id) { var g = self.byId(self.groups, id); return g ? g.name : ''; }).join(', ');
+          },
+          productsUsing: function (groupId) {
+            return this.products.filter(function (p) { return p.is_active && p.modifier_group_ids.indexOf(groupId) !== -1; }).length;
+          },
+          productsInArea: function (areaId) {
+            return this.products.filter(function (p) { return p.is_active && p.area_id === areaId; }).length;
+          },
+          get productsWithoutArea() {
+            return this.products.filter(function (p) { return p.is_active && !p.area_id; }).length;
+          },
+
+          // --- formularios ---
+          open: function (kind, obj) {
+            this.error = '';
+            if (kind === 'category') {
+              this.form = obj ? Object.assign({}, obj, { parent_id: obj.parent_id || '' })
+                : { id: null, parent_id: '', name: '', color_hex: '#D97706', sort_order: (this.categories.length + 1) * 10, is_active: true };
+            }
+            if (kind === 'product') {
+              this.form = obj ? Object.assign({}, obj, { area_id: obj.area_id || '', modifier_group_ids: obj.modifier_group_ids.slice() })
+                : { id: null, category_id: this.selected, area_id: (this.areas.find(function (a) { return a.is_active; }) || {}).id || '',
+                    name: '', description: '', price: '', sku: '', sort_order: (this.visibleProducts.length + 1) * 10,
+                    is_available: true, is_active: true, modifier_group_ids: [] };
+            }
+            if (kind === 'group') {
+              this.form = obj ? JSON.parse(JSON.stringify(obj))
+                : { id: null, name: '', min: 0, max: 1, sort_order: (this.groups.length + 1) * 10, is_active: true,
+                    options: [{ id: 0, name: '', price_extra: 0, is_available: true }] };
+            }
+            if (kind === 'area') {
+              this.form = obj ? Object.assign({}, obj)
+                : { id: null, name: '', color_hex: '#2a78d6', sort_order: (this.areas.length + 1) * 10, is_active: true };
+            }
+            this.modal = kind;
+          },
+          toggleGroup: function (id) {
+            var l = this.form.modifier_group_ids, i = l.indexOf(id);
+            if (i === -1) l.push(id); else l.splice(i, 1);
+          },
+          addOption: function () { this.form.options.push({ id: 0, name: '', price_extra: 0, is_available: true }); },
+
+          save: async function () {
+            var f = this.form, kind = this.modal, body = Object.assign({}, f), base;
+            body.sort_order = Number(f.sort_order) || 0;
+            if (kind === 'category') {
+              base = '/api/admin/categories';
+              body.parent_id = f.parent_id ? Number(f.parent_id) : null;
+            }
+            if (kind === 'product') {
+              base = '/api/admin/products';
+              if (f.price === '' || isNaN(Number(f.price))) { this.error = 'Captura el precio'; return; }
+              body.price = Number(f.price);
+              body.category_id = Number(f.category_id);
+              body.area_id = f.area_id ? Number(f.area_id) : null;
+            }
+            if (kind === 'group') {
+              base = '/api/admin/modifier-groups';
+              body.min = Number(f.min) || 0;
+              body.max = Number(f.max) || 0;
+              body.options = f.options.map(function (o) { return Object.assign({}, o, { price_extra: Number(o.price_extra) || 0 }); });
+            }
+            if (kind === 'area') base = '/api/admin/areas';
+            this.busy = true;
+            this.error = '';
+            try {
+              var res = await fetch(f.id ? base + '/' + f.id : base, {
+                method: f.id ? 'PUT' : 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+              });
+              if (!res.ok) { this.error = (await res.text()) || 'No se pudo guardar'; return; }
+              var out = await res.json();
+              this.modal = null;
+              if (kind === 'category' && !f.id && out.category) this.selected = out.category.id;
+              if (kind === 'product' && out.price_before !== undefined) {
+                toast('Precio de ' + f.name + ': ' + this.fmt(out.price_before) + ' → ' + this.fmt(out.price_after));
+              } else {
+                toast('Guardado');
+              }
+              await this.load();
+            } catch (e) {
+              this.error = 'No se pudo conectar con el servidor';
+            } finally {
+              this.busy = false;
+            }
+          },
+          toggleAvailable: async function (p) {
+            var res = await fetch('/api/admin/products/' + p.id + '/availability', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ available: !p.is_available })
+            });
+            if (!res.ok) { toast((await res.text()) || 'No se pudo cambiar', 'error'); return; }
+            p.is_available = !p.is_available;
+            toast(p.name + (p.is_available ? ' disponible' : ' marcado como agotado'), p.is_available ? 'ok' : 'warn');
+          },
+          rule: function (g) {
+            if (g.min === g.max) return 'Elegir ' + g.min + (g.min > 0 ? ' (obligatorio)' : '');
+            if (g.min === 0) return 'Opcional, hasta ' + g.max;
+            return 'Elegir de ' + g.min + ' a ' + g.max;
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased" x-data="menuApp()" @keydown.escape.window="modal = null">
+    {{template "admin_nav" .}}
+
+    <main class="max-w-6xl mx-auto p-4 md:p-6 space-y-4">
+      <!-- Pestañas -->
+      <div class="flex flex-wrap bg-white border border-gray-200 rounded-xl p-1 gap-1 w-fit">
+        <template x-for="t in [{ k: 'productos', l: '🍽️ Productos' }, { k: 'modificadores', l: '🧩 Modificadores' }, { k: 'areas', l: '🏭 Áreas de producción' }]" :key="t.k">
+          <button @click="tab = t.k" :class="tab === t.k ? 'bg-slate-900 text-white font-bold' : 'text-gray-600 hover:bg-gray-100'"
+            class="px-3 py-1.5 rounded-lg text-xs transition" x-text="t.l"></button>
+        </template>
+      </div>
+
+      <!-- ===== Productos ===== -->
+      <div x-show="tab === 'productos'" class="grid md:grid-cols-[260px_1fr] gap-5 items-start">
+        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-3">
+          <div class="flex justify-between items-center px-2 py-1 mb-1">
+            <h2 class="text-sm font-black text-gray-900">Categorías</h2>
+            <button @click="open('category')" class="text-xs font-bold text-emerald-700 hover:underline">+ Nueva</button>
+          </div>
+          <template x-for="row in categoryTree" :key="row.cat.id">
+            <button @click="selected = row.cat.id"
+              :class="selected === row.cat.id ? 'bg-slate-900 text-white' : 'hover:bg-gray-50 text-gray-800'"
+              :style="row.depth ? 'padding-left: 1.75rem' : ''"
+              class="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-left text-sm transition">
+              <span x-show="row.depth" class="opacity-40 -ml-3 text-xs">↳</span>
+              <span class="w-3 h-3 rounded-full shrink-0" :style="'background:' + row.cat.color_hex"></span>
+              <span class="flex-1 truncate" :class="(row.depth ? 'font-medium' : 'font-bold') + (row.cat.is_active ? '' : ' line-through opacity-50')" x-text="row.cat.name"></span>
+              <span class="text-xs opacity-60" x-text="count(row.cat.id)"></span>
+            </button>
+          </template>
+          <p x-show="productsWithoutArea > 0" class="mx-2 mt-3 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+            ⚠️ <b x-text="productsWithoutArea"></b> producto(s) sin área de producción: no se imprime su comanda.
+          </p>
+        </section>
+
+        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5" x-show="category" x-cloak>
+          <div class="flex flex-wrap justify-between items-start gap-3 mb-4">
+            <div>
+              <p x-show="category && category.parent_id" class="text-[11px] font-semibold text-gray-400" x-text="category && categoryPath(category.parent_id) + ' ›'"></p>
+              <h2 class="text-lg font-black text-gray-900 flex items-center gap-2">
+                <span class="w-3.5 h-3.5 rounded-full" :style="category && 'background:' + category.color_hex"></span>
+                <span x-text="category && category.name"></span>
+                <span x-show="category && !category.is_active" class="text-[10px] uppercase bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full">Oculta en el POS</span>
+              </h2>
+              <p x-show="category && !category.parent_id && childrenOf(category.id).length" class="text-xs text-gray-500 mt-0.5">
+                Subcategorías: <span x-text="category && childrenOf(category.id).map(function (c) { return c.name; }).join(', ')"></span>
+              </p>
+            </div>
+            <div class="flex gap-2">
+              <button @click="open('category', category)" class="px-3 py-2 rounded-xl text-xs font-bold bg-gray-100 hover:bg-gray-200">Editar categoría</button>
+              <button @click="open('product')" class="px-3 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white">+ Producto</button>
+            </div>
+          </div>
+
+          <label class="flex items-center gap-2 text-xs text-gray-500 mb-2">
+            <input type="checkbox" x-model="showArchived" /> Mostrar archivados
+          </label>
+
+          <p x-show="visibleProducts.length === 0" class="text-sm text-gray-400 text-center py-10">No hay productos en esta categoría.</p>
+          <div class="divide-y divide-gray-100">
+            <template x-for="p in visibleProducts" :key="p.id">
+              <div class="flex flex-wrap items-center gap-3 py-2.5" :class="!p.is_active && 'opacity-50'">
+                <div class="flex-1 min-w-[160px]">
+                  <p class="font-bold text-gray-900">
+                    <span x-text="p.name"></span>
+                    <span x-show="!p.is_active" class="ml-1 text-[10px] uppercase bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded">Archivado</span>
+                  </p>
+                  <p class="flex flex-wrap gap-1.5 mt-0.5 text-[11px]">
+                    <span x-show="area(p.area_id)" class="flex items-center gap-1 text-gray-600">
+                      <span class="w-2 h-2 rounded-full" :style="area(p.area_id) && 'background:' + area(p.area_id).color_hex"></span>
+                      <span x-text="area(p.area_id) && area(p.area_id).name"></span>
+                    </span>
+                    <span x-show="!p.area_id" class="text-amber-700 font-semibold">Sin área</span>
+                    <span x-show="p.modifier_group_ids.length" class="text-sky-700 font-semibold" x-text="'· ' + groupNames(p)"></span>
+                  </p>
+                </div>
+                <span class="font-mono font-bold text-gray-900" x-text="fmt(p.price)"></span>
+                <button @click="toggleAvailable(p)"
+                  :class="p.is_available ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200' : 'bg-rose-100 text-rose-800 hover:bg-rose-200'"
+                  class="w-28 py-1.5 rounded-lg text-xs font-black transition"
+                  x-text="p.is_available ? '✓ Disponible' : '✕ Agotado'"></button>
+                <button @click="open('product', p)" class="text-xs font-bold text-slate-600 hover:text-slate-900 px-2">Editar</button>
+              </div>
+            </template>
+          </div>
+        </section>
+      </div>
+
+      <!-- ===== Modificadores ===== -->
+      <div x-show="tab === 'modificadores'" x-cloak class="space-y-4">
+        <div class="flex flex-wrap justify-between items-center gap-3">
+          <p class="text-xs text-gray-500 max-w-xl">
+            Grupos de opciones que se eligen al pedir un producto: tipo de leche, jarabes, extras. Se asignan a cada producto desde su
+            formulario. El precio extra se suma al del producto.
+          </p>
+          <button @click="open('group')" class="px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white">+ Grupo</button>
+        </div>
+        <p x-show="groups.length === 0" class="bg-white rounded-2xl border border-gray-200 p-8 text-center text-sm text-gray-400">
+          Aún no hay modificadores. Ejemplo: “Tipo de leche” (elegir 1): Entera, Deslactosada, Avena +$12.
+        </p>
+        <div class="grid md:grid-cols-2 gap-4">
+          <template x-for="g in groups" :key="g.id">
+            <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5" :class="!g.is_active && 'opacity-60'">
+              <div class="flex justify-between items-start gap-2">
+                <div>
+                  <h3 class="font-black text-gray-900">
+                    <span x-text="g.name"></span>
+                    <span x-show="!g.is_active" class="ml-1 text-[10px] uppercase bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded">Inactivo</span>
+                  </h3>
+                  <p class="text-[11px] text-gray-500"><span x-text="rule(g)"></span> · <span x-text="productsUsing(g.id) + ' producto(s)'"></span></p>
+                </div>
+                <button @click="open('group', g)" class="text-xs font-bold text-slate-600 hover:text-slate-900">Editar</button>
+              </div>
+              <div class="flex flex-wrap gap-1.5 mt-3">
+                <template x-for="o in g.options" :key="o.id">
+                  <span class="text-xs px-2 py-1 rounded-lg border" :class="o.is_available ? 'border-gray-200 text-gray-800' : 'border-dashed border-gray-300 text-gray-400 line-through'">
+                    <span x-text="o.name"></span><span x-show="o.price_extra > 0" class="font-mono text-gray-500" x-text="' +' + fmt(o.price_extra)"></span>
+                  </span>
+                </template>
+              </div>
+            </section>
+          </template>
+        </div>
+      </div>
+
+      <!-- ===== Áreas ===== -->
+      <div x-show="tab === 'areas'" x-cloak class="space-y-4">
+        <div class="flex flex-wrap justify-between items-center gap-3">
+          <p class="text-xs text-gray-500 max-w-xl">
+            Dónde se prepara cada producto (barra, cocina…). Las comandas se imprimen por área: cada área se asigna a una o varias impresoras en
+            <a href="/admin/dispositivos" class="underline font-semibold">Dispositivos</a>.
+          </p>
+          <button @click="open('area')" class="px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white">+ Área</button>
+        </div>
+        <div class="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
+          <template x-for="a in areas" :key="a.id">
+            <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5" :class="!a.is_active && 'opacity-60'">
+              <div class="flex justify-between items-start">
+                <h3 class="font-black text-gray-900 flex items-center gap-2">
+                  <span class="w-3 h-3 rounded-full" :style="'background:' + a.color_hex"></span>
+                  <span x-text="a.name"></span>
+                </h3>
+                <button @click="open('area', a)" class="text-xs font-bold text-slate-600 hover:text-slate-900">Editar</button>
+              </div>
+              <p class="text-xs text-gray-500 mt-1" x-text="productsInArea(a.id) + ' producto(s)'"></p>
+              <p class="text-xs mt-2">
+                <span x-show="a.printers.length" class="text-gray-700" x-text="'🖨️ ' + a.printers.join(', ')"></span>
+                <span x-show="!a.printers.length" class="text-amber-700 font-semibold">⚠️ Sin impresora: sus comandas no se imprimen</span>
+              </p>
+            </section>
+          </template>
+        </div>
+      </div>
+    </main>
+
+    <!-- ===== Modales ===== -->
+    <div x-show="modal" x-cloak @click.self="modal = null" class="fixed inset-0 z-40 bg-slate-900/60 flex items-center justify-center p-4">
+      <form @submit.prevent="save()" class="bg-white rounded-2xl w-full p-6 space-y-3 shadow-2xl max-h-[92vh] overflow-y-auto"
+        :class="modal === 'group' ? 'max-w-lg' : 'max-w-md'">
+        <h2 class="text-lg font-black text-gray-900"
+          x-text="{ category: form.id ? 'Editar categoría' : 'Nueva categoría', product: form.id ? 'Editar producto' : 'Nuevo producto',
+                    group: form.id ? 'Editar grupo de modificadores' : 'Nuevo grupo de modificadores', area: form.id ? 'Editar área' : 'Nueva área' }[modal]"></h2>
+
+        <label class="block">
+          <span class="text-xs font-bold text-gray-700">Nombre</span>
+          <input type="text" x-model="form.name" class="mt-1 w-full p-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+        </label>
+
+        <!-- Categoría -->
+        <template x-if="modal === 'category'">
+          <div class="space-y-3">
+            <label class="block">
+              <span class="text-xs font-bold text-gray-700">Dentro de</span>
+              <select x-model="form.parent_id" class="mt-1 w-full p-2 border border-gray-200 rounded-lg bg-white">
+                <option value="">— Ninguna (categoría principal)</option>
+                <template x-for="c in topCategories.filter(function (c) { return c.id !== form.id; })" :key="c.id">
+                  <option :value="c.id" x-text="c.name" :selected="c.id == form.parent_id"></option>
+                </template>
+              </select>
+              <span x-show="form.id && childrenOf(form.id).length" class="block text-[11px] text-gray-400 mt-1">Tiene subcategorías, así que debe seguir siendo principal.</span>
+            </label>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Color</span>
+                <input type="color" x-model="form.color_hex" class="mt-1 w-full h-10 border border-gray-200 rounded-lg" />
+              </label>
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Orden</span>
+                <input type="number" x-model="form.sort_order" class="mt-1 w-full p-2 border border-gray-200 rounded-lg" />
+              </label>
+            </div>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.is_active" /> Visible en el POS</label>
+          </div>
+        </template>
+
+        <!-- Producto -->
+        <template x-if="modal === 'product'">
+          <div class="space-y-3">
+            <label class="block">
+              <span class="text-xs font-bold text-gray-700">Descripción (opcional)</span>
+              <input type="text" x-model="form.description" class="mt-1 w-full p-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+            </label>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Precio (IVA incluido)</span>
+                <input type="number" min="0" step="0.5" x-model="form.price" class="mt-1 w-full p-2 font-mono border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+              </label>
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Categoría</span>
+                <select x-model.number="form.category_id" class="mt-1 w-full p-2 border border-gray-200 rounded-lg bg-white">
+                  <template x-for="row in categoryTree" :key="row.cat.id">
+                    <option :value="row.cat.id" :selected="row.cat.id === form.category_id" x-text="(row.depth ? '   ↳ ' : '') + row.cat.name"></option>
+                  </template>
+                </select>
+              </label>
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Área de producción</span>
+                <select x-model="form.area_id" class="mt-1 w-full p-2 border border-gray-200 rounded-lg bg-white">
+                  <option value="">— Sin área (no imprime comanda)</option>
+                  <template x-for="a in areas.filter(function (a) { return a.is_active || a.id === form.area_id; })" :key="a.id">
+                    <option :value="a.id" :selected="a.id == form.area_id" x-text="a.name"></option>
+                  </template>
+                </select>
+              </label>
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">SKU (opcional)</span>
+                <input type="text" x-model="form.sku" class="mt-1 w-full p-2 border border-gray-200 rounded-lg" />
+              </label>
+            </div>
+            <div>
+              <span class="text-xs font-bold text-gray-700">Modificadores</span>
+              <p x-show="groups.length === 0" class="text-[11px] text-gray-400 mt-1">Crea grupos en la pestaña Modificadores.</p>
+              <div class="grid grid-cols-1 gap-1.5 mt-1">
+                <template x-for="g in groups.filter(function (g) { return g.is_active || form.modifier_group_ids.indexOf(g.id) !== -1; })" :key="g.id">
+                  <button type="button" @click="toggleGroup(g.id)"
+                    :class="form.modifier_group_ids.indexOf(g.id) !== -1 ? 'border-sky-400 bg-sky-50' : 'border-gray-200 bg-white'"
+                    class="flex items-center gap-2 px-3 py-2 rounded-xl border text-left text-sm transition">
+                    <span :class="form.modifier_group_ids.indexOf(g.id) !== -1 ? 'bg-sky-600 border-sky-600 text-white' : 'border-gray-300 text-transparent'"
+                      class="w-4 h-4 rounded border-2 flex items-center justify-center text-[10px] font-black">✓</span>
+                    <span class="font-semibold" x-text="g.name"></span>
+                    <span class="text-[11px] text-gray-400 ml-auto" x-text="rule(g)"></span>
+                  </button>
+                </template>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Orden</span>
+                <input type="number" x-model="form.sort_order" class="mt-1 w-full p-2 border border-gray-200 rounded-lg" />
+              </label>
+              <label class="flex items-center gap-2 text-sm pt-5"><input type="checkbox" x-model="form.is_available" /> Disponible</label>
+            </div>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.is_active" /> Activo (desmarcado = archivado)</label>
+            <p x-show="form.id" class="text-[11px] text-gray-400">Los cambios de precio quedan en la bitácora y solo aplican a órdenes nuevas.</p>
+          </div>
+        </template>
+
+        <!-- Grupo de modificadores -->
+        <template x-if="modal === 'group'">
+          <div class="space-y-3">
+            <div class="grid grid-cols-2 gap-3">
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Mínimo a elegir</span>
+                <input type="number" min="0" x-model="form.min" class="mt-1 w-full p-2 border border-gray-200 rounded-lg" />
+                <span class="block text-[10px] text-gray-400">0 = opcional; 1 o más = obligatorio</span>
+              </label>
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Máximo</span>
+                <input type="number" min="1" x-model="form.max" class="mt-1 w-full p-2 border border-gray-200 rounded-lg" />
+                <span class="block text-[10px] text-gray-400">1 = solo una opción</span>
+              </label>
+            </div>
+            <div>
+              <span class="text-xs font-bold text-gray-700">Opciones</span>
+              <div class="space-y-1.5 mt-1">
+                <template x-for="(o, i) in form.options" :key="i">
+                  <div class="flex items-center gap-2">
+                    <input type="text" x-model="o.name" placeholder="Ej. Leche de avena"
+                      class="flex-1 min-w-0 p-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+                    <span class="text-xs text-gray-400">+$</span>
+                    <input type="number" min="0" step="0.5" x-model="o.price_extra" class="w-20 p-2 text-sm font-mono border border-gray-200 rounded-lg" />
+                    <label class="flex items-center gap-1 text-[11px] text-gray-600" title="Desmarca cuando se acabe">
+                      <input type="checkbox" x-model="o.is_available" /> Hay
+                    </label>
+                    <button type="button" x-show="!o.id" @click="form.options.splice(i, 1)" class="text-gray-400 hover:text-rose-600 px-1">×</button>
+                  </div>
+                </template>
+              </div>
+              <button type="button" @click="addOption()" class="mt-2 text-xs font-bold text-emerald-700 hover:underline">+ Opción</button>
+              <p class="text-[10px] text-gray-400 mt-1">Las opciones guardadas no se borran (pueden estar en órdenes pasadas): desmarca “Hay” para dejar de ofrecerlas.</p>
+            </div>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.is_active" /> Activo</label>
+          </div>
+        </template>
+
+        <!-- Área -->
+        <template x-if="modal === 'area'">
+          <div class="space-y-3">
+            <div class="grid grid-cols-2 gap-3">
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Color</span>
+                <input type="color" x-model="form.color_hex" class="mt-1 w-full h-10 border border-gray-200 rounded-lg" />
+              </label>
+              <label class="block">
+                <span class="text-xs font-bold text-gray-700">Orden</span>
+                <input type="number" x-model="form.sort_order" class="mt-1 w-full p-2 border border-gray-200 rounded-lg" />
+              </label>
+            </div>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.is_active" /> Activa</label>
+            <p class="text-[11px] text-gray-400">Qué impresora recibe sus comandas se configura en Dispositivos.</p>
+          </div>
+        </template>
+
+        <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600"></p>
+        <div class="flex gap-2 pt-1">
+          <button type="button" @click="modal = null" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+          <button type="submit" :disabled="busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">Guardar</button>
+        </div>
+      </form>
+    </div>
+  </body>
+</html>

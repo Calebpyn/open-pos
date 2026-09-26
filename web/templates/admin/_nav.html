@@ -1,0 +1,42 @@
+{{define "admin_nav"}}
+<header class="bg-slate-900 text-white shadow-md sticky top-0 z-20">
+  <div class="px-4 h-14 flex items-center gap-3">
+    <a href="/" class="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap">← POS</a>
+    <h1 class="text-base font-black whitespace-nowrap">⚙️ Administración</h1>
+    <nav class="flex-1 flex gap-1 overflow-x-auto">
+      {{- range $s := adminSections }}
+      <a href="/admin/{{$s.Key}}"
+         class="px-3 py-1.5 rounded-lg text-xs whitespace-nowrap transition {{if eq $s.Key $.Section}}bg-emerald-500 text-slate-950 font-black{{else}}text-gray-300 hover:text-white hover:bg-slate-800{{end}}">
+        {{$s.Label}}
+      </a>
+      {{- end }}
+    </nav>
+    <span class="text-xs text-slate-400 whitespace-nowrap hidden md:inline">{{.User.Name}}</span>
+    <button onclick="adminLogout()" class="text-xs font-bold text-rose-300 hover:text-rose-200 whitespace-nowrap">Salir</button>
+  </div>
+  {{- if .DefaultPIN }}
+  <div class="bg-amber-400 text-amber-950 text-xs font-semibold px-4 py-1.5">
+    ⚠️ El PIN genérico <b>0001</b> sigue activo. Crea los usuarios reales en <a href="/admin/usuarios" class="underline">Usuarios</a>
+    y después cámbiale el PIN o desactiva al “Usuario general”.
+  </div>
+  {{- end }}
+</header>
+<script>
+  function adminLogout() {
+    fetch('/api/admin/logout', { method: 'POST' }).finally(function () { location.href = '/admin/login'; });
+  }
+  // Si la sesión expira mientras la página está abierta, la API responde 401:
+  // se manda de regreso al inicio de sesión en lugar de fallar en silencio.
+  (function () {
+    var original = window.fetch;
+    window.fetch = function () {
+      return original.apply(this, arguments).then(function (res) {
+        if (res.status === 401 && res.url.indexOf('/api/admin/login') === -1) {
+          location.href = '/admin/login?next=' + encodeURIComponent(location.pathname);
+        }
+        return res;
+      });
+    };
+  })();
+</script>
+{{end}}

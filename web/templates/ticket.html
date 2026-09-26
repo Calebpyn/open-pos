@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ticket {{.OrderID}}-{{.BillNumber}}</title>
+    <style>
+      @page { size: 80mm auto; margin: 4mm; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: #e5e7eb;
+        color: #000;
+        font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace;
+      }
+      .ticket {
+        width: 72mm;
+        margin: 16px auto;
+        padding: 12px 10px;
+        background: #fff;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+      }
+      h1 { font-size: 15px; text-align: center; margin: 0 0 4px; }
+      .center { text-align: center; }
+      .muted { color: #444; }
+      hr { border: 0; border-top: 1px dashed #000; margin: 8px 0; }
+      table { width: 100%; border-collapse: collapse; }
+      td { vertical-align: top; padding: 1px 0; }
+      td.num { text-align: right; white-space: nowrap; padding-left: 6px; }
+      td.qty { width: 2.2em; }
+      .note { font-size: 11px; color: #444; padding-left: 2.2em; }
+      .total td { font-weight: bold; font-size: 14px; }
+      .actions { width: 72mm; margin: 0 auto 16px; display: flex; gap: 8px; }
+      .actions button, .actions a {
+        flex: 1; padding: 10px; border: 0; border-radius: 10px; cursor: pointer;
+        font: 600 13px system-ui, sans-serif; text-align: center; text-decoration: none;
+      }
+      .print { background: #059669; color: #fff; }
+      .close { background: #fff; color: #111; }
+      @media print {
+        body { background: #fff; }
+        .ticket { margin: 0; width: auto; box-shadow: none; padding: 0; }
+        .actions { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="ticket">
+      <h1>{{.BusinessName}}</h1>
+      {{- range .HeaderLines }}
+      <div class="center muted">{{.}}</div>
+      {{- end }}
+      <div class="center muted">{{localTime .PaidAt}}</div>
+      <hr />
+      <table>
+        <tr><td>Orden</td><td class="num">#{{.OrderID}} · Cuenta {{.BillNumber}}</td></tr>
+        {{- if .TableName }}<tr><td>Mesa</td><td class="num">{{.TableName}}</td></tr>{{ end }}
+        {{- if .CustomerName }}<tr><td>Cliente</td><td class="num">{{.CustomerName}}</td></tr>{{ end }}
+      </table>
+      <hr />
+      <table>
+        {{- range .Items }}
+        <tr>
+          <td class="qty">{{.Quantity}}</td>
+          <td>{{.Name}}</td>
+          <td class="num">{{money .Amount}}</td>
+        </tr>
+        {{- if .Modifiers }}<tr><td></td><td colspan="2" class="note">+ {{.Modifiers}}</td></tr>{{ end }}
+        {{- if .Notes }}<tr><td colspan="3" class="note">{{.Notes}}</td></tr>{{ end }}
+        {{- end }}
+      </table>
+      <hr />
+      <table>
+        <tr><td>Subtotal</td><td class="num">{{money .Subtotal}}</td></tr>
+        {{- if gt .Discount 0.0 }}
+        <tr>
+          <td>Descuento{{if eq .DiscountType "PERCENT"}} ({{.DiscountValue}}%){{end}}{{if .DiscountReason}}<div class="note" style="padding:0">{{.DiscountReason}}</div>{{end}}</td>
+          <td class="num">-{{money .Discount}}</td>
+        </tr>
+        {{- end }}
+        {{- if .PricesIncludeTax }}
+        <tr class="total"><td>TOTAL</td><td class="num">{{money .Total}}</td></tr>
+        <tr class="muted"><td>IVA incluido</td><td class="num">{{money .Tax}}</td></tr>
+        {{- else }}
+        <tr><td>IVA</td><td class="num">{{money .Tax}}</td></tr>
+        <tr class="total"><td>TOTAL</td><td class="num">{{money .Total}}</td></tr>
+        {{- end }}
+        {{- if gt .Tip 0.0 }}
+        <tr><td>Propina</td><td class="num">{{money .Tip}}</td></tr>
+        <tr class="total"><td>TOTAL PAGADO</td><td class="num">{{money .Grand}}</td></tr>
+        {{- end }}
+      </table>
+      {{- if .Payments }}
+      <hr />
+      <table>
+        {{- range .Payments }}
+        <tr><td>{{.Method}}{{if .Reference}} <span class="muted">({{.Reference}})</span>{{end}}</td><td class="num">{{money .Amount}}</td></tr>
+        {{- if gt .Received .Amount }}<tr class="muted"><td class="note">Recibido</td><td class="num">{{money .Received}}</td></tr>{{ end }}
+        {{- end }}
+        {{- if gt .Change 0.0 }}<tr class="total"><td>Cambio</td><td class="num">{{money .Change}}</td></tr>{{ end }}
+      </table>
+      {{- end }}
+      {{- if .TicketFooter }}
+      <hr />
+      <div class="center" style="white-space: pre-line">{{.TicketFooter}}</div>
+      {{- end }}
+    </div>
+
+    <div class="actions">
+      <button class="print" onclick="window.print()">🖨️ Imprimir</button>
+      <a class="close" href="javascript:window.close()">Cerrar</a>
+    </div>
+
+    {{- if .AutoPrint }}
+    <script>window.addEventListener('load', function () { window.print(); });</script>
+    {{- end }}
+  </body>
+</html>

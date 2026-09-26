@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nómina · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script>
+      function ymd(d) {
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      }
+
+      function payrollApp() {
+        return {
+          week: ymd(new Date()),
+          data: null,
+          open: {}, // colaboradores con el detalle abierto
+          busy: false,
+          collaborators: [],
+          form: null,
+          error: '',
+
+          init: function () { this.load(); this.loadCollaborators(); },
+          load: async function () {
+            try {
+              var res = await fetch('/api/admin/payroll?week=' + this.week);
+              if (!res.ok) { toast((await res.text()) || 'No se pudo cargar la semana', 'error'); return; }
+              this.data = await res.json();
+              this.week = this.data.week_start;
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            }
+          },
+          shift: function (days) {
+            var d = new Date(this.week + 'T12:00:00');
+            d.setDate(d.getDate() + days);
+            this.week = ymd(d);
+            this.load();
+          },
+          get isCurrentWeek() {
+            var today = new Date(), d = new Date(today);
+            d.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+            return this.week === ymd(d);
+          },
+          get csvUrl() { return '/api/admin/payroll.csv?week=' + this.week; },
+
+          request: async function (method, url, body) {
+            this.busy = true;
+            try {
+              var res = await fetch(url, { method: method, headers: { 'Content-Type': 'application/json' },
+                body: body === undefined ? undefined : JSON.stringify(body) });
+              if (!res.ok) { toast((await res.text()) || 'No se pudo guardar', 'error'); return null; }
+              return await res.json();
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+              return null;
+            } finally {
+              this.busy = false;
+            }
+          },
+          settle: async function (row) {
+            if (!confirm('¿Marcar como descontados ' + this.money(row.pending) + ' de ' + row.name + ' en la nómina de esta semana?')) return;
+            if (await this.request('POST', '/api/admin/payroll/settle', { collaborator_id: row.collaborator_id, week: this.week })) {
+              toast('Marcado como descontado');
+              this.load();
+            }
+          },
+          undo: async function (row) {
+            if (!confirm('¿Deshacer el "descontado" de ' + row.name + '? Sus cargos vuelven a quedar pendientes.')) return;
+            for (var i = 0; i < row.settlement_ids.length; i++) {
+              if (!(await this.request('DELETE', '/api/admin/payroll/settlements/' + row.settlement_ids[i]))) return;
+            }
+            toast('Se deshizo');
+            this.load();
+          },
+          voucher: async function (e) {
+            var out = await this.request('POST', '/api/payments/' + e.payment_id + '/voucher');
+            if (out) toast('Vale enviado a ' + out.printer);
+          },
+
+          // --- colaboradores ---
+          loadCollaborators: async function () {
+            var res = await fetch('/api/admin/collaborators');
+            if (res.ok) this.collaborators = await res.json();
+          },
+          edit: function (c) {
+            this.error = '';
+            this.form = c ? { id: c.id, name: c.name, is_active: c.is_active, weekly_limit: c.weekly_limit || '' }
+                          : { id: null, name: '', is_active: true, weekly_limit: '' };
+          },
+          save: async function () {
+            var f = this.form;
+            if (!f.name.trim()) { this.error = 'Escribe el nombre'; return; }
+            var body = { name: f.name, is_active: f.is_active, weekly_limit: f.weekly_limit === '' ? null : Number(f.weekly_limit) };
+            var out = await this.request(f.id ? 'PUT' : 'POST', f.id ? '/api/admin/collaborators/' + f.id : '/api/admin/collaborators', body);
+            if (!out) return;
+            this.form = null;
+            toast('Colaborador guardado');
+            this.loadCollaborators();
+          },
+
+          money: function (v) { return '$' + Number(v || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
+          when: function (t) { return new Date(t).toLocaleString('es-MX', { weekday: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased" x-data="payrollApp()" @keydown.escape.window="form = null">
+    {{template "admin_nav" .}}
+
+    <main class="max-w-5xl mx-auto p-4 md:p-6 space-y-5">
+      <!-- Semana -->
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm">
+        <div class="p-4 flex flex-wrap items-center gap-3 border-b border-gray-100">
+          <div>
+            <h2 class="text-lg font-black text-gray-900">Cargos a nómina</h2>
+            <p class="text-xs text-gray-500">Consumo de colaboradores que se descuenta de la nómina semanal (lunes a domingo).</p>
+          </div>
+          <div class="ml-auto flex items-center gap-1.5">
+            <button @click="shift(-7)" class="px-3 py-2 rounded-xl border border-gray-200 hover:border-gray-400 text-xs font-bold">← Anterior</button>
+            <span class="px-3 text-sm font-bold text-gray-900" x-text="data ? 'Semana del ' + data.label : '…'"></span>
+            <button @click="shift(7)" :disabled="isCurrentWeek" class="px-3 py-2 rounded-xl border border-gray-200 hover:border-gray-400 text-xs font-bold disabled:opacity-50">Siguiente →</button>
+            <a :href="csvUrl" class="px-3 py-2 rounded-xl border border-gray-200 hover:border-gray-400 text-xs font-bold">⬇️ CSV</a>
+          </div>
+        </div>
+
+        <div x-show="data && data.rows.length" class="px-4 py-3 flex gap-6 text-sm border-b border-gray-100">
+          <span>Total de la semana <b class="font-mono" x-text="data && money(data.total)"></b></span>
+          <span>Pendiente de descontar <b class="font-mono" :class="data && data.pending > 0 ? 'text-amber-700' : 'text-emerald-700'" x-text="data && money(data.pending)"></b></span>
+        </div>
+
+        <p x-show="data && !data.rows.length" class="text-sm text-gray-400 text-center py-10">Sin cargos a nómina esta semana.</p>
+
+        <div class="divide-y divide-gray-100">
+          <template x-for="row in (data ? data.rows : [])" :key="row.collaborator_id">
+            <div>
+              <div class="px-4 py-3 flex flex-wrap items-center gap-3">
+                <button @click="open[row.collaborator_id] = !open[row.collaborator_id]" class="flex-1 min-w-0 text-left">
+                  <span class="font-black text-gray-900" x-text="row.name"></span>
+                  <span class="text-xs text-gray-400" x-text="' · ' + row.entries.length + ' consumo(s) ' + (open[row.collaborator_id] ? '▴' : '▾')"></span>
+                </button>
+                <span class="font-mono font-black text-gray-900" x-text="money(row.total)"></span>
+                <template x-if="row.pending > 0">
+                  <button @click="settle(row)" :disabled="busy" class="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold disabled:opacity-50"
+                    x-text="'Marcar descontado (' + money(row.pending) + ')'"></button>
+                </template>
+                <template x-if="row.pending === 0">
+                  <span class="flex items-center gap-2">
+                    <span class="text-[11px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800">✓ Descontado</span>
+                    <button @click="undo(row)" class="text-[11px] text-gray-500 underline">Deshacer</button>
+                  </span>
+                </template>
+              </div>
+              <div x-show="open[row.collaborator_id]" class="px-4 pb-3">
+                <table class="w-full text-xs">
+                  <thead class="text-[10px] uppercase text-gray-400 text-left">
+                    <tr><th class="py-1">Fecha</th><th class="py-1">Consumo</th><th class="py-1">Autorizó</th><th class="py-1 text-right">A descontar</th><th></th></tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-50">
+                    <template x-for="e in row.entries" :key="e.payment_id">
+                      <tr>
+                        <td class="py-1.5 pr-2 whitespace-nowrap text-gray-600" x-text="when(e.at)"></td>
+                        <td class="py-1.5 pr-2">
+                          <span class="text-gray-800" x-text="e.items || ('Orden #' + e.order_id)"></span>
+                          <span x-show="e.discount" class="text-gray-400" x-text="' · desc. ' + money(e.discount)"></span>
+                        </td>
+                        <td class="py-1.5 pr-2 text-gray-500" x-text="e.authorized_by || '—'"></td>
+                        <td class="py-1.5 text-right font-mono font-bold" x-text="money(e.amount)"></td>
+                        <td class="py-1.5 pl-2 text-right whitespace-nowrap">
+                          <span x-show="e.settled" class="text-emerald-700">✓</span>
+                          <button @click="voucher(e)" :disabled="busy" class="ml-2 underline text-slate-700">Vale</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- Colaboradores -->
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-4">
+        <div class="flex justify-between items-center gap-3 mb-3">
+          <div>
+            <h2 class="text-base font-black text-gray-900">Colaboradores</h2>
+            <p class="text-xs text-gray-500">A quienes se puede cargar consumo. No necesitan usuario ni PIN.</p>
+          </div>
+          <button @click="edit(null)" class="px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white">+ Colaborador</button>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+          <template x-for="c in collaborators" :key="c.id">
+            <button @click="edit(c)" :class="c.is_active ? '' : 'opacity-50'" class="text-left border border-gray-200 hover:border-gray-400 rounded-xl px-3 py-2">
+              <p class="font-bold text-sm text-gray-900" x-text="c.name"></p>
+              <p class="text-[11px] text-gray-500" x-text="(c.is_active ? '' : 'Dado de baja · ') + (c.weekly_limit ? 'Tope ' + money(c.weekly_limit) + ' por semana' : 'Sin tope')"></p>
+            </button>
+          </template>
+        </div>
+      </section>
+    </main>
+
+    <div x-show="form" x-cloak @click.self="form = null" class="fixed inset-0 z-40 bg-slate-900/60 flex items-center justify-center p-4">
+      <template x-if="form">
+        <form @submit.prevent="save()" class="bg-white rounded-2xl w-full max-w-sm p-6 space-y-3 shadow-2xl">
+          <h2 class="text-lg font-black text-gray-900" x-text="form.id ? 'Editar colaborador' : 'Nuevo colaborador'"></h2>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Nombre</span>
+            <input type="text" x-model="form.name" class="mt-1 w-full p-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          </label>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Tope por semana (opcional)</span>
+            <span class="block text-[11px] text-gray-400">Si un cargo lo rebasa, el resto se cobra con otro método.</span>
+            <input type="number" min="0" step="1" x-model="form.weekly_limit" placeholder="Sin tope" class="mt-1 w-40 p-2 font-mono border border-gray-200 rounded-lg" />
+          </label>
+          <label x-show="form.id" class="flex items-center gap-2 text-sm">
+            <input type="checkbox" x-model="form.is_active" /> Activo (desmarcado = dado de baja; ya no aparece en el cobro)
+          </label>
+          <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600"></p>
+          <div class="flex gap-2 pt-1">
+            <button type="button" @click="form = null" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+            <button type="submit" :disabled="busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">Guardar</button>
+          </div>
+        </form>
+      </template>
+    </div>
+  </body>
+</html>

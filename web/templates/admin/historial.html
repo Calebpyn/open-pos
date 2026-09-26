@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Historial · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script>
+      function ymd(d) {
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      }
+      function addDays(d, n) { var x = new Date(d); x.setDate(x.getDate() + n); return x; }
+
+      var TYPES = { DINE_IN: 'Mesa', TAKEAWAY: 'Para llevar', FLASH: 'Mostrador' };
+      var STATUSES = { ACTIVE: 'Abierta', PAID: 'Cobrada', CANCELLED: 'Cancelada' };
+      var EVENTS = {
+        BILL_PAID: 'Cobro registrado', PAYROLL_CHARGE: 'Cargo a nómina', PAYMENT_RECLASSIFIED: 'Pago pasado a cargo a nómina', ITEM_EDITED: 'Producto editado', ORDER_ITEMS_ADDED: 'Productos agregados',
+        ORDER_CANCELLED: 'Orden cancelada', ITEM_VOID: 'Producto anulado',
+        ORDER_CLOSED_WITH_BALANCE: 'Cerrada con saldo sin cobrar', ORDER_DELIVERED: 'Entregada'
+      };
+
+      function historyApp() {
+        var today = new Date();
+        return {
+          tab: 'orders',
+          preset: 'today',
+          from: ymd(today),
+          to: ymd(today),
+          type: '',
+          status: '',
+          method: '',
+          q: '',
+          page: 1,
+          data: null,
+          pays: null,
+          loading: false,
+          detail: null,
+          printing: {},
+          presets: [
+            { key: 'today', label: 'Hoy' },
+            { key: 'yesterday', label: 'Ayer' },
+            { key: '7d', label: '7 días' },
+            { key: '30d', label: '30 días' },
+            { key: 'month', label: 'Este mes' }
+          ],
+          types: TYPES,
+          statuses: STATUSES,
+
+          init: function () {
+            var self = this, timer = null;
+            this.$watch('q', function () {
+              clearTimeout(timer);
+              timer = setTimeout(function () { self.page = 1; self.load(); }, 300);
+            });
+            this.load();
+          },
+          setPreset: function (key) {
+            var t = new Date(), f = t, to = t;
+            if (key === 'yesterday') { f = to = addDays(t, -1); }
+            if (key === '7d') { f = addDays(t, -6); }
+            if (key === '30d') { f = addDays(t, -29); }
+            if (key === 'month') { f = new Date(t.getFullYear(), t.getMonth(), 1); }
+            this.preset = key;
+            this.from = ymd(f);
+            this.to = ymd(to);
+            this.page = 1;
+            this.load();
+          },
+          custom: function () {
+            this.preset = 'custom';
+            this.page = 1;
+            if (this.from && this.to) this.load();
+          },
+          setTab: function (t) { this.tab = t; this.load(); },
+          load: async function () {
+            this.loading = true;
+            var base = 'from=' + this.from + '&to=' + this.to;
+            try {
+              var url = this.tab === 'orders'
+                ? '/api/admin/history/orders?' + base + '&type=' + this.type + '&status=' + this.status + '&q=' + encodeURIComponent(this.q) + '&page=' + this.page
+                : '/api/admin/history/payments?' + base + '&method=' + this.method;
+              var res = await fetch(url);
+              if (!res.ok) { toast((await res.text()) || 'No se pudo cargar el historial', 'error'); return; }
+              var out = await res.json();
+              if (this.tab === 'orders') this.data = out; else this.pays = out;
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            } finally {
+              this.loading = false;
+            }
+          },
+          get pages() { return this.data ? Math.max(1, Math.ceil(this.data.total / this.data.page_size)) : 1; },
+          goPage: function (p) { this.page = p; this.load(); },
+
+          open: async function (id) {
+            try {
+              var res = await fetch('/api/admin/history/orders/' + id);
+              if (!res.ok) { toast((await res.text()) || 'No se pudo abrir la orden', 'error'); return; }
+              this.detail = await res.json();
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            }
+          },
+          // Pasar un pago "Otro" (consumos anteriores a este método) a cargo a nómina.
+          collaborators: [],
+          reclass: null, // { payment_id, collaborator_id }
+          startReclass: async function (p) {
+            if (!this.collaborators.length) {
+              var res = await fetch('/api/admin/collaborators');
+              if (res.ok) this.collaborators = (await res.json()).filter(function (c) { return c.is_active; });
+            }
+            this.reclass = { payment_id: p.id, collaborator_id: '' };
+          },
+          saveReclass: async function () {
+            if (!this.reclass.collaborator_id) { toast('Elige al colaborador', 'warn'); return; }
+            try {
+              var res = await fetch('/api/admin/payments/' + this.reclass.payment_id + '/payroll', {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ collaborator_id: Number(this.reclass.collaborator_id) })
+              });
+              if (!res.ok) { toast((await res.text()) || 'No se pudo cambiar', 'error'); return; }
+              toast('Pago pasado a cargo a nómina');
+              this.reclass = null;
+              this.open(this.detail.order.id);
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            }
+          },
+          reprint: async function (billId) {
+            this.printing[billId] = true;
+            try {
+              var res = await fetch('/api/bills/' + billId + '/print', { method: 'POST' });
+              if (res.ok) toast('Ticket enviado a ' + (await res.json()).printer);
+              else toast((await res.text()) || 'No se pudo imprimir', 'error');
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            } finally {
+              this.printing[billId] = false;
+            }
+          },
+
+          money: function (v) { return '$' + Number(v || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
+          time: function (t) { return t ? new Date(t).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }) : '—'; },
+          dateTime: function (t) {
+            return t ? new Date(t).toLocaleString('es-MX', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+          },
+          duration: function (m) {
+            if (m === null || m === undefined) return '—';
+            m = Math.round(m);
+            return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
+          },
+          serve: function (m) { return m === null || m === undefined ? 'sin marcar' : (Math.round(m * 10) / 10) + ' min'; },
+          title: function (o) { return o.table || o.customer || TYPES[o.type]; },
+          statusClass: function (s) {
+            return s === 'PAID' ? 'bg-emerald-50 text-emerald-800' : s === 'CANCELLED' ? 'bg-rose-50 text-rose-700' : 'bg-amber-50 text-amber-800';
+          },
+          eventLabel: function (e) { return EVENTS[e.action] || e.action; },
+          eventDetail: function (e) {
+            var d = e.details || {}, parts = [];
+            if (d.product) parts.push((d.quantity || 1) + '× ' + d.product);
+            if (d.reason) parts.push('“' + d.reason + '”');
+            if (d.discount_reason) parts.push('Descuento: ' + d.discount_reason);
+            if (d.collaborator) parts.push('a ' + d.collaborator);
+            if (d.user) parts.push('por ' + d.user);
+            return parts.join(' · ');
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased" x-data="historyApp()" @keydown.escape.window="detail = null">
+    {{template "admin_nav" .}}
+
+    <main class="max-w-6xl mx-auto p-4 md:p-6 space-y-4">
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="flex bg-gray-200 p-1 rounded-xl gap-1">
+          <button @click="setTab('orders')" :class="tab === 'orders' ? 'bg-white shadow text-slate-900 font-bold' : 'text-gray-600'" class="px-3 py-1.5 rounded-lg text-xs">🧾 Órdenes</button>
+          <button @click="setTab('payments')" :class="tab === 'payments' ? 'bg-white shadow text-slate-900 font-bold' : 'text-gray-600'" class="px-3 py-1.5 rounded-lg text-xs">💳 Pagos</button>
+        </div>
+        <div class="flex flex-wrap bg-white border border-gray-200 rounded-xl p-1 gap-1">
+          <template x-for="p in presets" :key="p.key">
+            <button @click="setPreset(p.key)"
+              :class="preset === p.key ? 'bg-slate-900 text-white font-bold' : 'text-gray-600 hover:bg-gray-100'"
+              class="px-3 py-1.5 rounded-lg text-xs transition" x-text="p.label"></button>
+          </template>
+        </div>
+        <div class="flex items-center gap-1 bg-white border border-gray-200 rounded-xl px-2 py-1" :class="preset === 'custom' && 'ring-2 ring-slate-900'">
+          <input type="date" x-model="from" @change="custom()" class="text-xs p-1 rounded focus:outline-none" />
+          <span class="text-gray-400 text-xs">→</span>
+          <input type="date" x-model="to" @change="custom()" class="text-xs p-1 rounded focus:outline-none" />
+        </div>
+        <span x-show="loading" class="text-xs text-gray-400">Cargando…</span>
+      </div>
+
+      <!-- Órdenes -->
+      <section x-show="tab === 'orders'" class="bg-white rounded-2xl border border-gray-200 shadow-sm">
+        <div class="p-4 flex flex-wrap items-center gap-2 border-b border-gray-100">
+          <input type="text" x-model="q" placeholder="🔍 # de orden, mesa o cliente"
+            class="w-56 text-sm px-3 py-2 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          <select x-model="type" @change="page = 1; load()" class="text-sm px-2 py-2 rounded-xl border border-gray-200 bg-white">
+            <option value="">Todos los tipos</option>
+            <template x-for="(label, key) in types" :key="key"><option :value="key" x-text="label"></option></template>
+          </select>
+          <select x-model="status" @change="page = 1; load()" class="text-sm px-2 py-2 rounded-xl border border-gray-200 bg-white">
+            <option value="">Todos los estados</option>
+            <template x-for="(label, key) in statuses" :key="key"><option :value="key" x-text="label"></option></template>
+          </select>
+          <p x-show="data" class="ml-auto text-xs text-gray-500">
+            <b class="text-gray-900" x-text="data && data.total"></b> órdenes ·
+            cobrado <b class="text-gray-900 font-mono" x-text="data && money(data.total_paid)"></b>
+          </p>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="text-[11px] uppercase tracking-wider text-gray-400 text-left">
+              <tr>
+                <th class="px-4 py-2">Orden</th>
+                <th class="px-2 py-2">Hora</th>
+                <th class="px-2 py-2">Mesa / cliente</th>
+                <th class="px-2 py-2 text-right">Piezas</th>
+                <th class="px-2 py-2 text-right">Cobrado</th>
+                <th class="px-2 py-2">Duración</th>
+                <th class="px-4 py-2">Estado</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <template x-for="o in (data ? data.orders : [])" :key="o.id">
+                <tr @click="open(o.id)" class="hover:bg-gray-50 cursor-pointer">
+                  <td class="px-4 py-2.5 font-mono font-bold text-gray-900" x-text="'#' + o.id"></td>
+                  <td class="px-2 py-2.5 text-gray-600 whitespace-nowrap" x-text="dateTime(o.created_at)"></td>
+                  <td class="px-2 py-2.5">
+                    <span class="font-semibold text-gray-900" x-text="title(o)"></span>
+                    <span class="text-[11px] text-gray-400" x-text="' · ' + types[o.type]"></span>
+                  </td>
+                  <td class="px-2 py-2.5 text-right font-mono">
+                    <span x-text="o.items"></span>
+                    <span x-show="o.voids" class="text-[10px] text-rose-600 font-sans font-bold" x-text="'−' + o.voids + ' anul.'"></span>
+                  </td>
+                  <td class="px-2 py-2.5 text-right font-mono font-semibold" x-text="o.paid ? money(o.paid) : '—'"></td>
+                  <td class="px-2 py-2.5 text-gray-600 whitespace-nowrap" x-text="duration(o.duration_min)"></td>
+                  <td class="px-4 py-2.5">
+                    <span class="text-[11px] font-bold px-2 py-0.5 rounded-md" :class="statusClass(o.status)" x-text="statuses[o.status]"></span>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <p x-show="data && !data.orders.length" class="text-sm text-gray-400 text-center py-10">No hay órdenes con estos filtros.</p>
+        </div>
+        <div x-show="pages > 1" class="p-3 flex justify-center items-center gap-2 border-t border-gray-100 text-xs">
+          <button @click="goPage(page - 1)" :disabled="page <= 1" class="px-3 py-1.5 rounded-lg border border-gray-200 disabled:opacity-50">← Anteriores</button>
+          <span class="text-gray-500">Página <b x-text="page"></b> de <b x-text="pages"></b></span>
+          <button @click="goPage(page + 1)" :disabled="page >= pages" class="px-3 py-1.5 rounded-lg border border-gray-200 disabled:opacity-50">Siguientes →</button>
+        </div>
+      </section>
+
+      <!-- Pagos -->
+      <section x-show="tab === 'payments'" x-cloak class="bg-white rounded-2xl border border-gray-200 shadow-sm">
+        <div class="p-4 flex flex-wrap items-center gap-3 border-b border-gray-100">
+          <select x-model="method" @change="load()" class="text-sm px-2 py-2 rounded-xl border border-gray-200 bg-white">
+            <option value="">Todos los métodos</option>
+            <option value="CASH">Efectivo</option>
+            <option value="CARD_DEBIT">Tarjeta de débito</option>
+            <option value="CARD_CREDIT">Tarjeta de crédito</option>
+            <option value="TRANSFER">Transferencia</option>
+            <option value="PAYROLL">Cargo a nómina</option>
+            <option value="OTHER">Otro</option>
+          </select>
+          <template x-for="m in (pays ? pays.by_method : [])" :key="m.method">
+            <span class="text-xs bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1">
+              <span class="text-gray-500" x-text="m.method"></span> <b class="font-mono text-gray-900" x-text="money(m.amount)"></b>
+            </span>
+          </template>
+          <p x-show="pays" class="ml-auto text-xs text-gray-500">Total <b class="font-mono text-gray-900" x-text="pays && money(pays.total)"></b></p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="text-[11px] uppercase tracking-wider text-gray-400 text-left">
+              <tr>
+                <th class="px-4 py-2">Hora</th>
+                <th class="px-2 py-2">Orden</th>
+                <th class="px-2 py-2">Mesa / cliente</th>
+                <th class="px-2 py-2">Método</th>
+                <th class="px-2 py-2">Referencia</th>
+                <th class="px-2 py-2">Turno</th>
+                <th class="px-4 py-2 text-right">Monto</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <template x-for="(p, i) in (pays ? pays.payments : [])" :key="i">
+                <tr @click="open(p.order_id)" class="hover:bg-gray-50 cursor-pointer">
+                  <td class="px-4 py-2.5 text-gray-600 whitespace-nowrap" x-text="dateTime(p.paid_at)"></td>
+                  <td class="px-2 py-2.5 font-mono" x-text="'#' + p.order_id + ' · cta ' + p.bill_number"></td>
+                  <td class="px-2 py-2.5 font-semibold text-gray-900" x-text="p.where"></td>
+                  <td class="px-2 py-2.5"><span x-text="p.method"></span><span x-show="p.collaborator" class="text-sky-800 text-xs font-semibold" x-text="' · ' + p.collaborator"></span></td>
+                  <td class="px-2 py-2.5 text-gray-500 font-mono" x-text="p.reference || '—'"></td>
+                  <td class="px-2 py-2.5 text-gray-500" x-text="p.shift ? '#' + p.shift : '—'"></td>
+                  <td class="px-4 py-2.5 text-right font-mono font-semibold" x-text="money(p.amount)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <p x-show="pays && !pays.payments.length" class="text-sm text-gray-400 text-center py-10">No hay pagos en este periodo.</p>
+        </div>
+      </section>
+    </main>
+
+    <!-- Detalle de una orden -->
+    <div x-show="detail" x-cloak @click.self="detail = null" class="fixed inset-0 z-40 bg-slate-900/60 flex justify-end">
+      <template x-if="detail">
+        <div class="bg-white w-full max-w-2xl h-full overflow-y-auto shadow-2xl">
+          <div class="sticky top-0 bg-white border-b border-gray-100 px-5 py-4 flex justify-between items-start gap-3">
+            <div>
+              <p class="text-[11px] font-mono font-bold uppercase tracking-wider text-gray-400" x-text="'Orden #' + detail.order.id + ' · ' + types[detail.order.type]"></p>
+              <h2 class="text-xl font-black text-gray-900" x-text="title(detail.order)"></h2>
+              <span class="text-[11px] font-bold px-2 py-0.5 rounded-md" :class="statusClass(detail.order.status)" x-text="statuses[detail.order.status]"></span>
+            </div>
+            <button @click="detail = null" class="text-gray-400 hover:text-gray-700 text-xl px-2">✕</button>
+          </div>
+
+          <div class="p-5 space-y-5 text-sm">
+            <!-- Línea de tiempo -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div class="bg-gray-50 rounded-xl p-3">
+                <p class="text-[10px] font-bold uppercase text-gray-400">Abierta</p>
+                <p class="font-semibold" x-text="dateTime(detail.order.created_at)"></p>
+              </div>
+              <div class="bg-gray-50 rounded-xl p-3">
+                <p class="text-[10px] font-bold uppercase text-gray-400">Entregada</p>
+                <p class="font-semibold" x-text="dateTime(detail.delivered_at)"></p>
+              </div>
+              <div class="bg-gray-50 rounded-xl p-3">
+                <p class="text-[10px] font-bold uppercase text-gray-400">Cerrada</p>
+                <p class="font-semibold" x-text="dateTime(detail.order.closed_at)"></p>
+              </div>
+              <div class="bg-gray-50 rounded-xl p-3">
+                <p class="text-[10px] font-bold uppercase text-gray-400">Duración</p>
+                <p class="font-semibold" x-text="detail.order.closed_at ? duration((new Date(detail.order.closed_at) - new Date(detail.order.created_at)) / 60000) : 'abierta'"></p>
+              </div>
+            </div>
+            <p x-show="detail.order.cancel_reason" class="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-3 py-2 text-xs">
+              Motivo de cancelación: <b x-text="detail.order.cancel_reason"></b>
+            </p>
+            <p x-show="detail.notes" class="text-xs text-gray-500">Notas: <span x-text="detail.notes"></span></p>
+
+            <!-- Productos -->
+            <div>
+              <h3 class="text-xs font-black uppercase tracking-wider text-gray-500 mb-2">Productos</h3>
+              <table class="w-full">
+                <thead class="text-[10px] uppercase text-gray-400 text-left">
+                  <tr><th class="py-1">Producto</th><th class="py-1">Área</th><th class="py-1">Pedido</th><th class="py-1">Tiempo de salida</th><th class="py-1 text-right">Importe</th></tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                  <template x-for="it in detail.items" :key="it.id">
+                    <tr :class="it.status === 'VOID' ? 'text-gray-400 line-through' : ''">
+                      <td class="py-2 pr-2">
+                        <span class="font-semibold" x-text="it.quantity + '× ' + it.product"></span>
+                        <span x-show="it.modifiers" class="block text-[11px] text-gray-500 no-underline" x-text="it.modifiers"></span>
+                        <span x-show="it.notes" class="block text-[11px] text-gray-500" x-text="it.notes"></span>
+                        <span x-show="it.guest" class="block text-[10px] font-black uppercase text-sky-700" x-text="it.guest"></span>
+                        <span x-show="it.added_by || it.delivered_by" class="block text-[10px] text-gray-400 no-underline"
+                          x-text="(it.added_by ? 'Tomó: ' + it.added_by : '') + (it.added_by && it.delivered_by ? ' · ' : '') + (it.delivered_by ? 'Entregó: ' + it.delivered_by : '')"></span>
+                        <span x-show="it.status === 'VOID'" class="block text-[10px] font-bold text-rose-600 no-underline">Anulado</span>
+                      </td>
+                      <td class="py-2 pr-2 text-xs text-gray-500" x-text="it.area || '—'"></td>
+                      <td class="py-2 pr-2 text-xs text-gray-500 whitespace-nowrap" x-text="time(it.created_at)"></td>
+                      <td class="py-2 pr-2 text-xs whitespace-nowrap" :class="it.serve_min === null ? 'text-gray-400 italic' : 'font-semibold text-gray-800'"
+                        x-text="it.status === 'VOID' ? '—' : serve(it.serve_min)"></td>
+                      <td class="py-2 text-right font-mono" x-text="money(it.unit_price * it.quantity)"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Cuentas y pagos -->
+            <div x-show="detail.bills.length">
+              <h3 class="text-xs font-black uppercase tracking-wider text-gray-500 mb-2">Cobros</h3>
+              <div class="space-y-3">
+                <template x-for="b in detail.bills" :key="b.id">
+                  <div class="border border-gray-200 rounded-xl p-3 space-y-1">
+                    <div class="flex justify-between items-start gap-2">
+                      <div>
+                        <p class="font-bold text-gray-900" x-text="'Cuenta ' + b.number + (b.customer ? ' · ' + b.customer : '')"></p>
+                        <p class="text-[11px] text-gray-500" x-text="dateTime(b.paid_at) + (b.shift ? ' · turno #' + b.shift + (b.cashier ? ' (' + b.cashier + ')' : '') : '')"></p>
+                      </div>
+                      <div class="flex gap-2 text-xs font-bold shrink-0">
+                        <a :href="'/tickets/' + b.id" target="_blank" class="text-slate-600 underline">Ver ticket</a>
+                        <button @click="reprint(b.id)" :disabled="printing[b.id]" class="text-slate-900 underline disabled:opacity-50"
+                          x-text="printing[b.id] ? 'Imprimiendo…' : 'Reimprimir'"></button>
+                      </div>
+                    </div>
+                    <div class="flex justify-between text-xs text-gray-600"><span>Subtotal</span><span class="font-mono" x-text="money(b.subtotal)"></span></div>
+                    <div x-show="b.discount" class="flex justify-between text-xs text-rose-600">
+                      <span x-text="'Descuento' + (b.discount_reason ? ' (' + b.discount_reason + ')' : '')"></span><span class="font-mono" x-text="'-' + money(b.discount)"></span>
+                    </div>
+                    <div class="flex justify-between text-xs font-bold"><span>Total</span><span class="font-mono" x-text="money(b.total)"></span></div>
+                    <div x-show="b.tip" class="flex justify-between text-xs text-gray-600"><span>Propina</span><span class="font-mono" x-text="money(b.tip)"></span></div>
+                    <div class="pt-1 mt-1 border-t border-gray-100 space-y-0.5">
+                      <template x-for="(p, i) in b.payments" :key="i">
+                        <div class="flex justify-between text-xs">
+                          <span>
+                            <span class="font-semibold" x-text="p.method"></span>
+                            <span x-show="p.reference" class="text-gray-400 font-mono" x-text="' · ' + p.reference"></span>
+                            <span x-show="p.received > p.amount" class="text-gray-400" x-text="' · recibido ' + money(p.received) + ', cambio ' + money(p.change)"></span>
+                            <span x-show="p.collaborator" class="text-sky-800 font-semibold" x-text="' · ' + p.collaborator"></span>
+                            <button x-show="p.method_key === 'OTHER' && !(reclass && reclass.payment_id === p.id)" @click="startReclass(p)"
+                              class="ml-1 text-[11px] font-bold text-sky-800 underline">Pasar a cargo a nómina</button>
+                          </span>
+                          <span class="font-mono" x-text="money(p.amount)"></span>
+                        </div>
+                        <div x-show="reclass && reclass.payment_id === p.id" class="flex items-center gap-2 mt-1">
+                          <select x-model="reclass.collaborator_id" class="text-xs p-1.5 rounded-lg border border-gray-200 bg-white flex-1">
+                            <option value="">¿A qué colaborador?</option>
+                            <template x-for="c in collaborators" :key="c.id"><option :value="c.id" x-text="c.name"></option></template>
+                          </select>
+                          <button @click="saveReclass()" class="text-xs font-bold px-2.5 py-1.5 rounded-lg bg-slate-900 text-white">Guardar</button>
+                          <button @click="reclass = null" class="text-xs text-gray-500">Cancelar</button>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- Bitácora -->
+            <div x-show="detail.events.length">
+              <h3 class="text-xs font-black uppercase tracking-wider text-gray-500 mb-2">Bitácora</h3>
+              <ul class="space-y-1.5">
+                <template x-for="(e, i) in detail.events" :key="i">
+                  <li class="text-xs flex gap-2">
+                    <span class="text-gray-400 font-mono shrink-0" x-text="time(e.at)"></span>
+                    <span><b x-text="eventLabel(e)"></b> <span class="text-gray-500" x-text="eventDetail(e)"></span></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </body>
+</html>

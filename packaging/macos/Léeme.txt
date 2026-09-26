@@ -1,0 +1,55 @@
+OPEN POS __VERSION__ - Instalación en la Mac de la cafetería
+============================================================
+
+INSTALAR
+1. Haz doble clic en "Open POS" (aquí mismo en el DMG) y elige "Instalar":
+   se copia a Aplicaciones y se abre. También puedes arrastrarlo a
+   Aplicaciones y abrirlo desde ahí.
+   Si macOS dice que no puede verificar al desarrollador:
+   Configuración del Sistema > Privacidad y seguridad > "Abrir de todos modos".
+   (Pasa si el DMG llegó por AirDrop o descarga; copiado desde una USB no.)
+2. Si macOS pregunta si "open-pos" puede aceptar conexiones entrantes,
+   elige "Permitir": sin eso el iPad no se conecta.
+
+Si tenías la beta 0.1 o 0.2 (la que dejaba el servidor corriendo por detrás),
+la versión nueva la retira sola al abrirse. Tus datos se conservan.
+
+USO DIARIO
+- Open POS es una app normal con su propia ventana. Mientras está abierta,
+  esta Mac es el servidor: el iPad y las demás terminales se conectan a ella.
+- Al cerrarla (botón rojo o Cmd+Q) se apaga todo. Si hay mesas abiertas o
+  terminales conectadas, pregunta antes: al cerrarla, el iPad deja de
+  funcionar hasta que la vuelvas a abrir. Las mesas y órdenes no se pierden.
+- Mientras está abierta, la Mac no se duerme por inactividad (la pantalla sí).
+- Menú Open POS > "Abrir al iniciar sesión": para que se abra sola al
+  prender la Mac (macOS 13 o posterior).
+- Menú Open POS > "Conectar un iPad…": muestra la dirección para el iPad.
+  En el iPad: Safari > esa dirección > Compartir > "Agregar a inicio".
+- Menú Ver: Punto de venta (Cmd+1), Caja (Cmd+2), Administración (Cmd+3),
+  zoom (Cmd + / Cmd -) y pantalla completa (Ctrl+Cmd+F).
+
+PRIMEROS PASOS
+- Entra a Administración con el PIN 0001 y cámbialo en Usuarios.
+- Configura menú, mesas y plano del salón, impresoras (Dispositivos) y datos
+  del negocio.
+
+DATOS Y RESPALDOS
+- Menú Ayuda > "Abrir carpeta de datos y respaldos".
+  Base de datos: ~/Library/Application Support/Open POS/pos.db
+  Respaldos diarios (se guardan 14): .../Open POS/respaldos
+  También se descargan desde Administración > Configuración > Respaldos.
+  Copia uno a una USB o a la nube de vez en cuando.
+- Menú Ayuda > "Ver registro del servidor" si algo falla.
+- Las descargas (CSV de reportes, respaldos) van a la carpeta Descargas.
+
+ACTUALIZAR (sin perder datos)
+1. Cierra Open POS (Cmd+Q).
+2. Abre la versión nueva desde su DMG y elige "Instalar".
+Solo se reemplaza la app: tus datos viven aparte, en
+~/Library/Application Support/Open POS, y no se tocan. Si la versión nueva
+trae cambios a la base, antes de aplicarlos se guarda sola una copia en
+.../Open POS/respaldos (la verás en Administración > Configuración > Respaldos).
+
+DESINSTALAR
+Borra la app de Aplicaciones. Los datos se quedan en
+~/Library/Application Support/Open POS hasta que borres esa carpeta.

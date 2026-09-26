@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Impresiones · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script>
+      var SIZE_LABELS = { normal: 'Normal', alta: 'Alta', ancha: 'Ancha', grande: 'Grande', enorme: 'Enorme' };
+
+      function printFormatsApp() {
+        return {
+          tab: 'receipt',
+          loaded: false,
+          data: null,
+          areaId: null,
+          form: null,     // formato que se está editando
+          saved: '',      // JSON de lo guardado, para saber si hay cambios
+          paper: 58,
+          printerId: '',
+          preview: { cols: 32, lines: [] },
+          previewError: '',
+          busy: false,
+          _timer: null,
+
+          init: async function () {
+            await this.load();
+            var self = this;
+            this.$watch('form', function () { self.schedulePreview(); }, { deep: true });
+            this.$watch('paper', function () { self.schedulePreview(); });
+          },
+          load: async function () {
+            var res = await fetch('/api/admin/print-formats');
+            if (!res.ok) { toast('No se pudo cargar el editor', 'error'); return; }
+            this.data = await res.json();
+            if (this.data.printers.length) {
+              this.printerId = this.data.printers[0].id;
+              this.paper = this.data.printers[0].paper_width >= 80 ? 80 : 58;
+            }
+            if (!this.areaId && this.data.areas.length) this.areaId = this.data.areas[0].id;
+            this.select(this.tab);
+            this.loaded = true;
+          },
+          select: function (tab) {
+            this.tab = tab;
+            var src = tab === 'receipt' ? this.data.receipt : this.data.comandas[this.areaId];
+            this.form = src ? JSON.parse(JSON.stringify(src)) : null;
+            this.saved = JSON.stringify(this.form);
+            this.schedulePreview();
+          },
+          pickArea: function (id) {
+            if (this.dirty && !confirm('Hay cambios sin guardar en esta área. ¿Descartarlos?')) return;
+            this.areaId = id;
+            this.select('comanda');
+          },
+          switchTab: function (tab) {
+            if (tab === this.tab) return;
+            if (this.dirty && !confirm('Hay cambios sin guardar. ¿Descartarlos?')) return;
+            this.select(tab);
+          },
+          get dirty() { return this.form && JSON.stringify(this.form) !== this.saved; },
+          get areaName() {
+            var id = this.areaId, a = this.data && this.data.areas.find(function (x) { return x.id === id; });
+            return a ? a.name : '';
+          },
+          sizeLabel: function (s) { return SIZE_LABELS[s] || s; },
+
+          body: function (extra) {
+            var b = { kind: this.tab, area_id: this.areaId, paper_width: this.paper };
+            b[this.tab] = this.form;
+            return JSON.stringify(Object.assign(b, extra || {}));
+          },
+          schedulePreview: function () {
+            var self = this;
+            clearTimeout(this._timer);
+            this._timer = setTimeout(function () { self.refreshPreview(); }, 200);
+          },
+          refreshPreview: async function () {
+            if (!this.form) return;
+            var f = this.form;
+            f.feed_lines = Number(f.feed_lines) || 0;
+            if (f.logo_width_pct !== undefined) f.logo_width_pct = Number(f.logo_width_pct) || 60;
+            if (f.copies !== undefined) f.copies = Number(f.copies) || 1;
+            try {
+              var res = await fetch('/api/admin/print-formats/preview', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: this.body()
+              });
+              if (!res.ok) { this.previewError = await res.text(); return; }
+              this.previewError = '';
+              this.preview = await res.json();
+            } catch (e) {
+              this.previewError = 'No se pudo conectar con el servidor';
+            }
+          },
+          // Un renglón impreso se parte cada (columnas / ancho de letra) caracteres.
+          rows: function (l) {
+            var per = Math.max(1, Math.floor(this.preview.cols / (l.w || 1)));
+            var text = l.text || '', out = [];
+            if (!text.length) return [''];
+            for (var i = 0; i < text.length; i += per) out.push(text.slice(i, i + per));
+            return out;
+          },
+
+          save: async function () {
+            this.busy = true;
+            try {
+              var url = this.tab === 'receipt' ? '/api/admin/print-formats/receipt' : '/api/admin/print-formats/comanda/' + this.areaId;
+              var res = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(this.form) });
+              if (!res.ok) { toast((await res.text()) || 'No se pudo guardar', 'error'); return; }
+              if (this.tab === 'receipt') this.data.receipt = JSON.parse(JSON.stringify(this.form));
+              else this.data.comandas[this.areaId] = JSON.parse(JSON.stringify(this.form));
+              this.saved = JSON.stringify(this.form);
+              toast(this.tab === 'receipt' ? 'Formato del ticket guardado' : 'Formato de comandas de ' + this.areaName + ' guardado');
+            } finally {
+              this.busy = false;
+            }
+          },
+          resetDefaults: function () {
+            var def = this.tab === 'receipt' ? this.data.receipt_default : this.data.comanda_default;
+            var keepFooter = this.form.footer_lines;
+            this.form = JSON.parse(JSON.stringify(def));
+            if (this.tab === 'receipt') this.form.footer_lines = keepFooter;
+          },
+          testPrint: async function () {
+            if (!this.printerId) { toast('No hay impresoras activas', 'warn'); return; }
+            this.busy = true;
+            try {
+              var res = await fetch('/api/admin/print-formats/test', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: this.body({ printer_id: Number(this.printerId) })
+              });
+              if (!res.ok) { toast((await res.text()) || 'No se pudo imprimir', 'error'); return; }
+              var out = await res.json();
+              toast('Prueba impresa en ' + out.printer);
+            } finally {
+              this.busy = false;
+            }
+          },
+          uploadLogo: async function (ev) {
+            var file = ev.target.files[0];
+            if (!file) return;
+            var fd = new FormData();
+            fd.append('logo', file);
+            var res = await fetch('/api/admin/print-formats/logo', { method: 'POST', body: fd });
+            ev.target.value = '';
+            if (!res.ok) { toast((await res.text()) || 'No se pudo subir el logo', 'error'); return; }
+            this.data.has_logo = true;
+            this.form.show_logo = true;
+            toast('Logo cargado');
+            this.refreshPreview();
+          },
+          removeLogo: async function () {
+            if (!confirm('¿Quitar el logo del ticket?')) return;
+            var res = await fetch('/api/admin/print-formats/logo', { method: 'DELETE' });
+            if (!res.ok) { toast('No se pudo quitar el logo', 'error'); return; }
+            this.data.has_logo = false;
+            toast('Logo quitado');
+            this.refreshPreview();
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>
+      [x-cloak] { display: none !important; }
+      .paper { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.4; }
+      /* Solo el texto va preformateado: la sangría de la plantilla no debe contar como espacios. */
+      .paper .row { white-space: nowrap; overflow: visible; }
+      .paper .glyphs { display: inline-block; white-space: pre; }
+    </style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased" x-data="printFormatsApp()">
+    {{template "admin_nav" .}}
+
+    <main class="max-w-6xl mx-auto p-4 md:p-6 space-y-4" x-show="loaded" x-cloak>
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="flex bg-white border border-gray-200 rounded-xl p-1 gap-1">
+          <button @click="switchTab('receipt')" :class="tab === 'receipt' ? 'bg-slate-900 text-white font-bold' : 'text-gray-600 hover:bg-gray-100'"
+            class="px-3 py-1.5 rounded-lg text-xs transition">🧾 Ticket de compra</button>
+          <button @click="switchTab('comanda')" :class="tab === 'comanda' ? 'bg-slate-900 text-white font-bold' : 'text-gray-600 hover:bg-gray-100'"
+            class="px-3 py-1.5 rounded-lg text-xs transition">🍳 Comandas por área</button>
+        </div>
+        <span x-show="dirty" class="text-xs font-semibold text-amber-700">● Cambios sin guardar</span>
+      </div>
+
+      <!-- Áreas (comandas) -->
+      <div x-show="tab === 'comanda'" class="flex flex-wrap gap-2">
+        <template x-for="a in data && data.areas" :key="a.id">
+          <button @click="pickArea(a.id)"
+            :class="areaId === a.id ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-gray-700 border-gray-200 hover:border-gray-400'"
+            class="flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-bold">
+            <span class="w-2.5 h-2.5 rounded-full" :style="'background:' + a.color_hex"></span><span x-text="a.name"></span>
+          </button>
+        </template>
+        <p x-show="data && !data.areas.length" class="text-xs text-gray-500">
+          No hay áreas de producción. Créalas en <a href="/admin/menu" class="underline">Menú → Áreas de producción</a>.
+        </p>
+      </div>
+
+      <div class="grid lg:grid-cols-[1fr_400px] gap-5 items-start">
+        <!-- ===== Formulario ===== -->
+        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-5" x-show="form">
+          <!-- Selector de tamaño reutilizable -->
+          <template x-if="tab === 'receipt' && form">
+            <div class="space-y-5">
+              <div>
+                <h3 class="text-sm font-black text-gray-900 mb-2">Logo</h3>
+                <div class="flex flex-wrap items-center gap-3">
+                  <label class="px-3 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white cursor-pointer">
+                    <span x-text="data.has_logo ? 'Cambiar logo' : 'Subir logo'"></span>
+                    <input type="file" accept="image/png,image/jpeg,image/gif" class="hidden" @change="uploadLogo($event)" />
+                  </label>
+                  <button x-show="data.has_logo" @click="removeLogo()" class="text-xs font-bold text-rose-600 hover:underline">Quitar</button>
+                  <label x-show="data.has_logo" class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.show_logo" /> Imprimir logo</label>
+                </div>
+                <label x-show="data.has_logo && form.show_logo" class="block mt-3">
+                  <span class="text-xs font-bold text-gray-700">Ancho del logo: <span x-text="form.logo_width_pct + '%'"></span> del papel</span>
+                  <input type="range" min="20" max="100" step="5" x-model.number="form.logo_width_pct" class="w-full" />
+                </label>
+                <p class="text-[11px] text-gray-400 mt-1">PNG o JPG. Se convierte a blanco y negro; los logos de trazo sólido y fondo blanco se ven mejor.</p>
+              </div>
+
+              <div>
+                <h3 class="text-sm font-black text-gray-900 mb-2">Encabezado</h3>
+                <label class="flex items-center gap-2 text-sm mb-2"><input type="checkbox" x-model="form.show_name" /> Nombre del negocio</label>
+                <div x-show="form.show_name" class="flex flex-wrap gap-1.5 mb-3">
+                  <template x-for="s in data.sizes" :key="s">
+                    <button type="button" @click="form.name_size = s" :class="form.name_size === s ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-gray-200 text-gray-700'"
+                      class="px-2.5 py-1 rounded-lg border text-xs font-semibold" x-text="sizeLabel(s)"></button>
+                  </template>
+                </div>
+                <label class="block">
+                  <span class="text-xs font-bold text-gray-700">Renglones bajo el nombre</span>
+                  <textarea x-model="form.header_lines" rows="3" placeholder="Av. Juárez 123, Centro&#10;Tel. 555 123 4567&#10;RFC XAXX010101000"
+                    class="mt-1 w-full p-2 text-sm font-mono border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400"></textarea>
+                </label>
+                <label class="flex items-center gap-2 text-sm mt-2"><input type="checkbox" x-model="form.show_date" /> Fecha y hora</label>
+                <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.show_order_info" /> Número de orden, mesa y cliente</label>
+              </div>
+
+              <div>
+                <h3 class="text-sm font-black text-gray-900 mb-2">Productos</h3>
+                <div class="flex flex-wrap gap-1.5 mb-2">
+                  <template x-for="s in data.sizes" :key="s">
+                    <button type="button" @click="form.item_size = s" :class="form.item_size === s ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-gray-200 text-gray-700'"
+                      class="px-2.5 py-1 rounded-lg border text-xs font-semibold" x-text="sizeLabel(s)"></button>
+                  </template>
+                </div>
+                <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.show_item_notes" /> Modificadores y notas bajo cada producto</label>
+              </div>
+
+              <div>
+                <h3 class="text-sm font-black text-gray-900 mb-2">Totales</h3>
+                <div class="flex flex-wrap gap-1.5 mb-2">
+                  <template x-for="s in data.sizes" :key="s">
+                    <button type="button" @click="form.total_size = s" :class="form.total_size === s ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-gray-200 text-gray-700'"
+                      class="px-2.5 py-1 rounded-lg border text-xs font-semibold" x-text="sizeLabel(s)"></button>
+                  </template>
+                </div>
+                <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.show_tax" /> Desglose de IVA</label>
+                <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.show_payments" /> Forma de pago y cambio</label>
+              </div>
+
+              <div>
+                <h3 class="text-sm font-black text-gray-900 mb-2">Pie del ticket</h3>
+                <textarea x-model="form.footer_lines" rows="3" placeholder="¡Gracias por su visita!&#10;Síguenos en @cafeteria"
+                  class="w-full p-2 text-sm font-mono border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400"></textarea>
+              </div>
+
+              <label class="block max-w-[200px]">
+                <span class="text-xs font-bold text-gray-700">Avance antes del corte (renglones)</span>
+                <input type="number" min="0" max="10" x-model.number="form.feed_lines" class="mt-1 w-full p-2 border border-gray-200 rounded-lg" />
+              </label>
+            </div>
+          </template>
+
+          <template x-if="tab === 'comanda' && form">
+            <div class="space-y-5">
+              <p class="text-xs text-gray-500">Formato de las comandas de <b x-text="areaName"></b>. Cada área imprime su propia comanda.</p>
+              <template x-for="field in [
+                  { k: 'title_size', label: 'Título (COMANDA / ADICIONAL)' },
+                  { k: 'location_size', label: 'Mesa o cliente' },
+                  { k: 'item_size', label: 'Productos' },
+                  { k: 'modifier_size', label: 'Modificadores (leche, jarabes…)' },
+                  { k: 'note_size', label: 'Notas del producto' },
+                  { k: 'order_note_size', label: 'Nota general de la orden' }
+                ]" :key="field.k">
+                <div>
+                  <h3 class="text-sm font-black text-gray-900 mb-1.5" x-text="field.label"></h3>
+                  <div class="flex flex-wrap gap-1.5">
+                    <template x-for="s in data.sizes" :key="s">
+                      <button type="button" @click="form[field.k] = s" :class="form[field.k] === s ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-gray-200 text-gray-700'"
+                        class="px-2.5 py-1 rounded-lg border text-xs font-semibold" x-text="sizeLabel(s)"></button>
+                    </template>
+                  </div>
+                </div>
+              </template>
+              <div class="space-y-1">
+                <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.show_area_name" /> Nombre del área bajo el título</label>
+                <label class="flex items-start gap-2 text-sm">
+                  <input type="checkbox" x-model="form.guest_tickets" class="mt-1" />
+                  <span>Una comanda por persona
+                    <span class="block text-[11px] text-gray-400">Si la orden se dividió por personas. Apagado: una sola comanda con secciones "-- Juan --".</span>
+                  </span>
+                </label>
+                <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="form.show_order_info" /> Número de orden y hora</label>
+              </div>
+              <div class="flex flex-wrap gap-6">
+                <div>
+                  <span class="text-xs font-bold text-gray-700">Copias</span>
+                  <div class="flex gap-1.5 mt-1">
+                    <template x-for="n in [1, 2, 3]" :key="n">
+                      <button type="button" @click="form.copies = n" :class="form.copies === n ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-gray-200 text-gray-700'"
+                        class="w-9 py-1 rounded-lg border text-xs font-bold" x-text="n"></button>
+                    </template>
+                  </div>
+                </div>
+                <label class="block w-40">
+                  <span class="text-xs font-bold text-gray-700">Avance antes del corte</span>
+                  <input type="number" min="0" max="10" x-model.number="form.feed_lines" class="mt-1 w-full p-2 border border-gray-200 rounded-lg" />
+                </label>
+              </div>
+            </div>
+          </template>
+
+          <div class="flex flex-wrap gap-2 pt-3 border-t border-gray-100">
+            <button @click="save()" :disabled="busy || !dirty" class="px-5 py-2.5 rounded-xl text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40">Guardar</button>
+            <button @click="select(tab)" x-show="dirty" class="px-4 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Descartar cambios</button>
+            <button @click="resetDefaults()" class="ml-auto px-3 py-2.5 rounded-xl text-xs font-semibold text-gray-500 hover:text-gray-900">Restablecer formato original</button>
+          </div>
+        </section>
+
+        <!-- ===== Vista previa ===== -->
+        <aside class="lg:sticky lg:top-20 space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-black text-gray-900">Vista previa</h2>
+            <div class="flex bg-white border border-gray-200 rounded-lg p-0.5 text-xs">
+              <template x-for="w in [58, 80]" :key="w">
+                <button @click="paper = w" :class="paper === w ? 'bg-slate-900 text-white font-bold' : 'text-gray-600'" class="px-2.5 py-1 rounded-md" x-text="w + ' mm'"></button>
+              </template>
+            </div>
+          </div>
+          <p x-show="previewError" x-text="previewError" class="text-xs text-rose-600 font-semibold"></p>
+          <div class="bg-gray-200 rounded-2xl p-4 overflow-x-auto flex justify-center max-h-[70vh] overflow-y-auto">
+            <div class="paper bg-white shadow-md px-3 py-4 text-gray-900" :style="'width: calc(' + preview.cols + 'ch + 1.5rem)'">
+              <template x-for="(l, i) in preview.lines" :key="i">
+                <div>
+                  <template x-if="l.kind === 'text'">
+                    <div>
+                      <template x-for="(chunk, j) in rows(l)" :key="j">
+                        <div class="row" :style="'height:' + (1.4 * (l.h || 1)) + 'em; text-align:' + (l.align || 'left')">
+                          <span class="glyphs" :class="l.bold ? 'font-bold' : ''"
+                            :style="'transform: scale(' + (l.w || 1) + ',' + (l.h || 1) + '); transform-origin: ' + (l.align || 'left') + ' top'"
+                            x-text="chunk || ' '"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="l.kind === 'image'">
+                    <div :style="'text-align:' + (l.align || 'center')"><img :src="l.image" :style="'width:' + l.pct + '%; image-rendering: pixelated; display: inline-block'" /></div>
+                  </template>
+                  <template x-if="l.kind === 'feed'">
+                    <div :style="'height:' + (1.4 * l.lines) + 'em'"></div>
+                  </template>
+                  <template x-if="l.kind === 'cut'">
+                    <div class="border-t-2 border-dashed border-gray-300 my-2 text-center text-[10px] text-gray-400 leading-none pt-1">✂ corte</div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-500">Muestra con datos de ejemplo. El tamaño de letra y los cortes de renglón son los de la impresora.</p>
+          <div class="flex gap-2">
+            <select x-model="printerId" class="flex-1 min-w-0 p-2 text-xs border border-gray-200 rounded-lg bg-white">
+              <template x-for="p in data && data.printers" :key="p.id">
+                <option :value="p.id" x-text="p.name + ' (' + p.paper_width + ' mm)'"></option>
+              </template>
+            </select>
+            <button @click="testPrint()" :disabled="busy || !printerId" class="px-3 py-2 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-40">🖨️ Imprimir prueba</button>
+          </div>
+          <p class="text-[11px] text-gray-400">La prueba usa lo que ves (aunque no lo hayas guardado).</p>
+        </aside>
+      </div>
+    </main>
+  </body>
+</html>

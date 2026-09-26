@@ -1,0 +1,1346 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cobro · Orden #{{.Data.OrderID}}</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script>
+      window.__CHECKOUT__ = {{.Data}};
+      window.__METHODS__ = {{.Methods}};
+
+      // Las fórmulas de totales replican computeTotals (internal/handler/money.go).
+      // Todo se maneja en centavos; el servidor recalcula y valida al cobrar.
+      function checkoutApp(initial, methods) {
+        var params = new URLSearchParams(location.search);
+        var backUrl = params.get('volver') === 'pos'
+          ? '/?tab=pos'
+          : '/?tab=expo&expo=' + (initial.order_type === 'DINE_IN' ? 'DINE_IN' : 'TAKEAWAY');
+
+        return {
+          data: initial,
+          methods: methods,
+          methodOrder: ['CASH', 'CARD_DEBIT', 'CARD_CREDIT', 'TRANSFER', 'PAYROLL', 'OTHER'],
+          methodIcons: { CASH: '💵', CARD_DEBIT: '💳', CARD_CREDIT: '💳', TRANSFER: '🏦', PAYROLL: '🧑‍🍳', OTHER: '🧾' },
+          // Cargo a nómina: colaboradores y PIN de caja que lo autoriza.
+          collaborators: [],
+          pinModal: false,
+          payrollPin: '',
+          pinError: '',
+          voucherBusy: false,
+          backUrl: backUrl,
+
+          selected: initial.items.map(function (i) { return i.id; }),
+
+          customerQuery: initial.customer_name || '',
+          customerId: null,
+          customerResults: [],
+          saveCustomer: false,
+          newCustomer: { phone: '', email: '', rfc: '' },
+
+          discountType: '',
+          discountValue: '',
+          discountReason: '',
+
+          tipMode: 'PERCENT',
+          tipPercent: 0,
+          tipCustom: '',
+
+          payments: [],
+          draft: { method: 'CASH', amount: '', received: '', reference: '', collaborator_id: '' },
+          splitN: 1,
+
+          submitting: false,
+          error: '',
+          result: null,
+
+          modal: null,
+          modalItem: null,
+          modalReason: '',
+          modalError: '',
+          modalBusy: false,
+
+          // --- utilidades ---
+          c: function (v) { return Math.round((Number(v) || 0) * 100); },
+          fmt: function (cents) {
+            var sign = cents < 0 ? '-' : '';
+            return sign + '$' + (Math.abs(cents) / 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          },
+          lineC: function (item) { return this.c(item.unit_price) * item.quantity; },
+          // Piezas a cobrar de un renglón repetido ("1 de 2× Pepperoni").
+          take: {},
+          takeOf: function (item) { return this.take[item.id] || item.quantity; },
+          setTake: function (item, n) {
+            n = Math.max(1, Math.min(item.quantity, n));
+            if (n === item.quantity) delete this.take[item.id]; else this.take[item.id] = n;
+            this.take = Object.assign({}, this.take);
+          },
+          selLineC: function (item) { return this.c(item.unit_price) * this.takeOf(item); },
+          get quantities() {
+            var out = {}, self = this;
+            this.data.items.forEach(function (i) {
+              if (self.isSelected(i.id) && self.take[i.id]) out[i.id] = self.take[i.id];
+            });
+            return out;
+          },
+          isSelected: function (id) { return this.selected.indexOf(id) !== -1; },
+          toggle: function (id) {
+            var i = this.selected.indexOf(id);
+            if (i === -1) this.selected.push(id); else this.selected.splice(i, 1);
+            if (i !== -1) { delete this.take[id]; this.take = Object.assign({}, this.take); }
+          },
+          selectAll: function () { this.selected = this.data.items.map(function (i) { return i.id; }); this.take = {}; },
+          selectNone: function () { this.selected = []; this.take = {}; },
+
+          get orderTitle() {
+            if (this.data.table_name) return this.data.table_name;
+            if (this.data.customer_name) return this.data.customer_name;
+            return this.data.order_type === 'FLASH' ? 'Venta Mostrador' : 'Para Llevar';
+          },
+          get orderTypeLabel() {
+            return { DINE_IN: '🍽️ Mesa', TAKEAWAY: '🛍️ Para Llevar', FLASH: '⚡ Flash' }[this.data.order_type] || this.data.order_type;
+          },
+          get allSelected() { return this.selected.length === this.data.items.length; },
+
+          // --- totales ---
+          get itemsC() {
+            var self = this;
+            return this.data.items
+              .filter(function (i) { return self.isSelected(i.id); })
+              .reduce(function (s, i) { return s + self.selLineC(i); }, 0);
+          },
+          get discountC() {
+            var v = Number(this.discountValue) || 0;
+            if (this.discountType === 'PERCENT') return Math.round(this.itemsC * v / 100);
+            if (this.discountType === 'AMOUNT') return this.c(v);
+            return 0;
+          },
+          get discountError() {
+            var v = Number(this.discountValue) || 0;
+            if (v < 0) return 'El descuento no puede ser negativo';
+            if (this.discountType === 'PERCENT' && v > 100) return 'El descuento no puede pasar de 100%';
+            if (this.discountType === 'AMOUNT' && this.discountC > this.itemsC) return 'El descuento no puede ser mayor al importe';
+            return '';
+          },
+          get netC() { return Math.max(0, this.itemsC - this.discountC); },
+          get taxC() {
+            var s = this.data.settings, net = this.netC;
+            return s.prices_include_tax ? net - Math.round(net / (1 + s.tax_rate)) : Math.round(net * s.tax_rate);
+          },
+          get totalC() { return this.data.settings.prices_include_tax ? this.netC : this.netC + this.taxC; },
+          get tipC() {
+            return this.tipMode === 'CUSTOM' ? this.c(this.tipCustom) : Math.round(this.totalC * this.tipPercent / 100);
+          },
+          get grandC() { return this.totalC + this.tipC; },
+          get paidC() { return this.payments.reduce(function (s, p) { return s + p.amountC; }, 0); },
+          get remainingC() { return this.grandC - this.paidC; },
+          get changeC() { return this.payments.reduce(function (s, p) { return s + p.changeC; }, 0); },
+          get taxPercent() { return Math.round(this.data.settings.tax_rate * 10000) / 100; },
+
+          setDiscount: function (type, value) {
+            this.discountType = type;
+            this.discountValue = value === undefined ? '' : String(value);
+          },
+          setTip: function (p) { this.tipMode = 'PERCENT'; this.tipPercent = p; this.tipCustom = ''; },
+
+          // --- pagos ---
+          get splitShareC() { return this.splitN > 1 ? Math.ceil(this.grandC / this.splitN) : 0; },
+          setSplit: function (n) {
+            this.splitN = Math.max(1, Math.min(20, Number(n) || 1));
+            this.draft.amount = '';
+          },
+          // Monto sugerido cuando no se escribe uno: lo pendiente, o la parte
+          // proporcional si se divide en partes iguales. Se recalcula solo si
+          // cambian descuento, propina o productos.
+          get autoAmountC() {
+            if (this.remainingC <= 0) return 0;
+            return this.splitN > 1 ? Math.min(this.splitShareC, this.remainingC) : this.remainingC;
+          },
+          selectMethod: function (m) {
+            this.draft.method = m;
+            this.draft.received = '';
+            this.draft.reference = '';
+            if (m === 'PAYROLL' && !this.collaborators.length) this.loadCollaborators();
+          },
+          loadCollaborators: async function () {
+            try {
+              var res = await fetch('/api/collaborators');
+              if (res.ok) this.collaborators = await res.json();
+            } catch (e) {}
+          },
+          collaboratorName: function (id) {
+            var c = this.collaborators.find(function (x) { return x.id === Number(id); });
+            return c ? c.name : '';
+          },
+          get hasPayroll() { return this.payments.some(function (p) { return p.method === 'PAYROLL'; }); },
+          applyStaffDiscount: function () {
+            this.setDiscount('PERCENT', this.data.settings.staff_discount_pct);
+            this.discountReason = 'Colaborador';
+          },
+          get draftAmountC() {
+            if (this.draft.amount !== '') return this.c(this.draft.amount);
+            // En efectivo, si reciben menos del monto sugerido se toma como pago parcial.
+            if (this.draft.method === 'CASH' && this.draft.received !== '') {
+              return Math.min(this.c(this.draft.received), this.autoAmountC);
+            }
+            return this.autoAmountC;
+          },
+          get draftReceivedC() {
+            if (this.draft.method !== 'CASH') return 0;
+            return this.draft.received === '' ? this.draftAmountC : this.c(this.draft.received);
+          },
+          get draftChangeC() {
+            return this.draft.method === 'CASH' ? Math.max(0, this.draftReceivedC - this.draftAmountC) : 0;
+          },
+          get draftError() {
+            if (this.remainingC <= 0) return '';
+            if (this.draftAmountC <= 0) return 'Monto inválido';
+            if (this.draftAmountC > this.remainingC) return 'El monto excede lo pendiente';
+            if (this.draft.method === 'CASH' && this.draftReceivedC < this.draftAmountC) return 'El efectivo recibido no cubre el monto';
+            if (this.draft.method === 'PAYROLL' && !this.draft.collaborator_id) return 'Elige al colaborador';
+            return '';
+          },
+          get canAddPayment() { return this.remainingC > 0 && !this.draftError; },
+          get cashSuggestions() {
+            var a = this.draftAmountC;
+            if (a <= 0) return [];
+            var set = [a];
+            [2000, 5000, 10000, 20000, 50000, 100000].forEach(function (step) {
+              var v = Math.ceil(a / step) * step;
+              if (set.indexOf(v) === -1) set.push(v);
+            });
+            return set.sort(function (x, y) { return x - y; }).slice(0, 6);
+          },
+          addPayment: function () {
+            if (!this.canAddPayment) return;
+            var cash = this.draft.method === 'CASH';
+            var amountC = this.draftAmountC;
+            var receivedC = cash ? this.draftReceivedC : 0;
+            this.payments.push({
+              method: this.draft.method,
+              amountC: amountC,
+              receivedC: receivedC,
+              changeC: cash ? receivedC - amountC : 0,
+              reference: this.draft.method === 'PAYROLL' ? '' : this.draft.reference.trim(),
+              collaborator_id: this.draft.method === 'PAYROLL' ? Number(this.draft.collaborator_id) : 0
+            });
+            this.draft = { method: this.draft.method, amount: '', received: '', reference: '', collaborator_id: '' };
+          },
+          removePayment: function (i) {
+            this.payments.splice(i, 1);
+          },
+
+          get blockers() {
+            var list = [];
+            if (!this.data.cash_open) list.push('No hay turno de caja abierto: ábrelo en 💵 Caja para poder cobrar');
+            if (this.data.items.length === 0) list.push('No hay productos pendientes de cobro');
+            else if (this.selected.length === 0) list.push('Selecciona al menos un producto');
+            if (this.discountError) list.push(this.discountError);
+            if (this.tipC < 0) list.push('La propina no puede ser negativa');
+            if (this.remainingC > 0) list.push('Faltan ' + this.fmt(this.remainingC) + ' por registrar en pagos');
+            if (this.remainingC < 0) list.push('Los pagos exceden el total por ' + this.fmt(-this.remainingC) + '; quita alguno');
+            return list;
+          },
+          get canConfirm() { return !this.submitting && this.blockers.length === 0; },
+
+          // --- cliente ---
+          searchCustomers: async function () {
+            this.customerId = null;
+            var q = this.customerQuery.trim();
+            if (q.length < 2) { this.customerResults = []; return; }
+            try {
+              var res = await fetch('/api/customers?q=' + encodeURIComponent(q));
+              this.customerResults = res.ok ? await res.json() : [];
+            } catch (e) {
+              this.customerResults = [];
+            }
+          },
+          pickCustomer: function (cu) {
+            this.customerId = cu.id;
+            this.customerQuery = cu.name;
+            this.customerResults = [];
+            this.saveCustomer = false;
+          },
+          clearCustomer: function () {
+            this.customerId = null;
+            this.customerQuery = '';
+            this.customerResults = [];
+          },
+
+          // --- acciones ---
+          confirm: async function () {
+            if (!this.canConfirm) return;
+            // Un cargo a nómina lo autoriza quien está en caja con su PIN.
+            if (this.hasPayroll && !this.payrollPin) {
+              this.pinError = '';
+              this.pinModal = true;
+              this.$nextTick(() => this.$refs.pinInput && this.$refs.pinInput.focus());
+              return;
+            }
+            this.submitting = true;
+            this.error = '';
+            var name = this.customerQuery.trim();
+            var hasDiscount = this.discountC > 0;
+            var payload = {
+              item_ids: this.selected,
+              quantities: this.quantities,
+              discount_type: hasDiscount ? this.discountType : '',
+              discount_value: hasDiscount ? Number(this.discountValue) : 0,
+              discount_reason: hasDiscount ? this.discountReason.trim() : '',
+              tip: this.tipC / 100,
+              customer_id: this.customerId,
+              customer_name: name,
+              new_customer: (!this.customerId && this.saveCustomer && name)
+                ? { name: name, phone: this.newCustomer.phone, email: this.newCustomer.email, rfc: this.newCustomer.rfc }
+                : null,
+              payments: this.payments.map(function (p) {
+                return { method: p.method, amount: p.amountC / 100, received: p.receivedC / 100, reference: p.reference,
+                         collaborator_id: p.collaborator_id || 0 };
+              }),
+              payroll_pin: this.payrollPin
+            };
+            try {
+              var res = await fetch('/api/orders/' + this.data.order_id + '/pay', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              if (!res.ok) {
+                var msg = (await res.text()) || 'Error al cobrar';
+                if (this.hasPayroll && (res.status === 401 || res.status === 403 || res.status === 429)) {
+                  // PIN rechazado: se vuelve a pedir.
+                  this.payrollPin = '';
+                  this.pinError = msg;
+                  this.pinModal = true;
+                  return;
+                }
+                this.payrollPin = '';
+                this.error = msg;
+                return;
+              }
+              this.payrollPin = '';
+              this.result = await res.json();
+            } catch (e) {
+              this.error = 'No se pudo conectar con el servidor';
+            } finally {
+              this.submitting = false;
+            }
+          },
+          // --- Cuentas por persona ---
+          get hasGuests() { return this.data.guests && this.data.guests.length > 0; },
+          // Resumen por persona de lo pendiente: [{ pos, label, totalC, ids }]
+          get guestTabs() {
+            var tabs = {}, order = [], self = this;
+            this.data.items.forEach(function (i) {
+              var k = i.guest_position || 0;
+              if (!tabs[k]) { tabs[k] = { pos: k, label: i.guest || 'Mesa', totalC: 0, ids: [] }; order.push(k); }
+              tabs[k].totalC += self.lineC(i);
+              tabs[k].ids.push(i.id);
+            });
+            return order.map(function (k) { return tabs[k]; });
+          },
+          selectGuest: function (tab) { this.selected = tab.ids.slice(); this.take = {}; },
+          isGuestSelected: function (tab) {
+            var sel = this.selected;
+            return sel.length === tab.ids.length && tab.ids.every(function (id) { return sel.indexOf(id) !== -1; });
+          },
+          mv: null, // { item, position, name, quantity, busy }
+          openMove: function (item) {
+            this.mv = { item: item, position: String(item.guest_position || 0), name: '', quantity: item.quantity, busy: false };
+          },
+          get nextGuestPos() {
+            return (this.data.guests || []).reduce(function (m, g) { return Math.max(m, g.position); }, 0) + 1;
+          },
+          saveMove: async function () {
+            var mv = this.mv;
+            mv.busy = true;
+            try {
+              var res = await fetch('/api/order-items/' + mv.item.id + '/guest', {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ position: Number(mv.position), name: mv.name.trim(), quantity: Number(mv.quantity) })
+              });
+              if (!res.ok) { toast((await res.text()) || 'No se pudo mover', 'error'); return; }
+              this.mv = null;
+              await this.reload();
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            } finally {
+              mv.busy = false;
+            }
+          },
+
+          // --- Editar la orden: cambiar un producto o agregar productos ---
+          catalog: null, // { products: [...], groups: {id: grupo}, byProduct: {pid: [gid]} }
+          ed: null,      // { mode: 'edit'|'add', item, product_id, quantity, mods: [], notes, pin, q, picking, error, busy }
+          loadCatalog: async function () {
+            if (this.catalog) return;
+            var both = await Promise.all([fetch('/api/menu/tree'), fetch('/api/menu/modifiers')]);
+            var tree = (await both[0].json()).categories, mods = await both[1].json();
+            var products = [];
+            (function walk(cats, trail) {
+              cats.forEach(function (c) {
+                c.products.forEach(function (p) { if (p.available) products.push(Object.assign({ where: trail.concat([c.name]).join(' › ') }, p)); });
+                walk(c.children, trail.concat([c.name]));
+              });
+            })(tree, []);
+            var groups = {};
+            (mods.groups || []).forEach(function (g) { groups[g.id] = g; });
+            this.catalog = { products: products, groups: groups, byProduct: mods.products || {} };
+          },
+          openEdit: async function (item) {
+            await this.loadCatalog();
+            this.ed = { mode: 'edit', item: item, product_id: item.product_id, quantity: item.quantity,
+              mods: (item.modifier_ids || []).slice(), notes: item.notes || '', pin: '', q: '', picking: false, error: '', busy: false };
+          },
+          openAdd: async function () {
+            await this.loadCatalog();
+            this.ed = { mode: 'add', item: null, product_id: null, quantity: 1, mods: [], notes: '', pin: '', q: '', picking: true, error: '', busy: false, guest: '0' };
+          },
+          get edProduct() {
+            var id = this.ed && this.ed.product_id;
+            return this.catalog && id ? this.catalog.products.find(function (p) { return p.id === id; }) : null;
+          },
+          get edGroups() {
+            if (!this.ed || !this.ed.product_id || !this.catalog) return [];
+            var c = this.catalog;
+            return (c.byProduct[this.ed.product_id] || []).map(function (gid) { return c.groups[gid]; }).filter(Boolean);
+          },
+          get edResults() {
+            if (!this.catalog) return [];
+            var q = this.ed.q.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+            return this.catalog.products.filter(function (p) {
+              return !q || (p.name + ' ' + p.where).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().indexOf(q) !== -1;
+            }).slice(0, 30);
+          },
+          pickProductForEdit: function (p) {
+            if (this.ed.product_id !== p.id) this.ed.mods = [];
+            this.ed.product_id = p.id;
+            this.ed.picking = false;
+          },
+          toggleMod: function (g, o) {
+            var mods = this.ed.mods, i = mods.indexOf(o.id);
+            if (i !== -1) { mods.splice(i, 1); return; }
+            if (g.max === 1) {
+              // Opción única: reemplaza a la otra del mismo grupo.
+              var ids = g.options.map(function (x) { return x.id; });
+              this.ed.mods = mods.filter(function (id) { return ids.indexOf(id) === -1; });
+              this.ed.mods.push(o.id);
+              return;
+            }
+            var chosen = g.options.filter(function (x) { return mods.indexOf(x.id) !== -1; }).length;
+            if (g.max > 0 && chosen >= g.max) { toast('En "' + g.name + '" se eligen máximo ' + g.max, 'warn'); return; }
+            mods.push(o.id);
+          },
+          get edUnitC() {
+            var p = this.edProduct;
+            if (!p) return 0;
+            var self = this, extra = 0;
+            this.edGroups.forEach(function (g) {
+              g.options.forEach(function (o) { if (self.ed.mods.indexOf(o.id) !== -1) extra += self.c(o.price_extra); });
+            });
+            return this.c(p.price) + extra;
+          },
+          saveEdit: async function () {
+            var ed = this.ed;
+            if (!ed.product_id) { ed.error = 'Elige el producto'; return; }
+            for (var i = 0; i < this.edGroups.length; i++) {
+              var g = this.edGroups[i];
+              var n = g.options.filter(function (o) { return ed.mods.indexOf(o.id) !== -1; }).length;
+              if (n < g.min) { ed.error = 'Elige ' + (g.min === 1 ? 'una opción' : g.min + ' opciones') + ' en "' + g.name + '"'; return; }
+            }
+            if (!/^\d{4,6}$/.test(ed.pin)) { ed.error = 'Caja: escribe tu PIN para autorizar'; return; }
+            ed.busy = true;
+            ed.error = '';
+            var line = { product_id: ed.product_id, quantity: ed.quantity, modifier_ids: ed.mods, notes: ed.notes, guest: Number(ed.guest || 0) };
+            try {
+              var res = ed.mode === 'edit'
+                ? await fetch('/api/order-items/' + ed.item.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(Object.assign({ pin: ed.pin }, line)) })
+                : await fetch('/api/orders/' + this.data.order_id + '/items', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: ed.pin, items: [line] }) });
+              if (!res.ok) { ed.error = (await res.text()) || 'No se pudo guardar'; ed.pin = ''; return; }
+              var out = await res.json(), prints = out.prints || {};
+              this.ed = null;
+              if (prints.failed && prints.failed.length) toast('Guardado, pero no se pudo imprimir la comanda: ' + prints.failed.join('; '), 'error');
+              else toast((ed.mode === 'edit' ? 'Cambio guardado' : 'Producto agregado') + (prints.printed && prints.printed.length ? ' · comanda en ' + prints.printed.join(', ') : ''));
+              await this.reload();
+            } catch (e) {
+              ed.error = 'No se pudo conectar con el servidor';
+            } finally {
+              ed.busy = false;
+            }
+          },
+
+          // Pre-cuenta: lo seleccionado con el descuento aplicado, sin cobrar.
+          preBillBusy: false,
+          printPreBill: async function () {
+            if (this.preBillBusy) return;
+            if (this.selected.length === 0) { toast('Selecciona al menos un producto', 'warn'); return; }
+            if (this.discountError) { toast(this.discountError, 'warn'); return; }
+            this.preBillBusy = true;
+            var hasDiscount = this.discountC > 0;
+            try {
+              var res = await fetch('/api/orders/' + this.data.order_id + '/prebill', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  item_ids: this.selected,
+                  quantities: this.quantities,
+                  discount_type: hasDiscount ? this.discountType : '',
+                  discount_value: hasDiscount ? Number(this.discountValue) : 0,
+                  discount_reason: hasDiscount ? this.discountReason.trim() : ''
+                })
+              });
+              if (res.ok) toast('Pre-cuenta enviada a ' + (await res.json()).printer);
+              else toast((await res.text()) || 'No se pudo imprimir la pre-cuenta', 'error');
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            } finally {
+              this.preBillBusy = false;
+            }
+          },
+          // Cajón: se abre con su botón, independiente del cobro y del ticket.
+          drawerBusy: false,
+          openDrawer: async function () {
+            if (this.drawerBusy) return;
+            this.drawerBusy = true;
+            try {
+              var res = await fetch('/api/cash/drawer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: 'cobro' })
+              });
+              if (res.ok) toast('Cajón abierto');
+              else toast((await res.text()) || 'No se pudo abrir el cajón', 'error');
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            } finally {
+              this.drawerBusy = false;
+            }
+          },
+          submitPin: function () {
+            if (!/^\d{4,6}$/.test(this.payrollPin)) { this.pinError = 'Escribe tu PIN'; return; }
+            this.pinModal = false;
+            this.confirm();
+          },
+          get voucher() { return this.result && this.result.payroll_voucher && this.result.payroll_voucher.payment_ids && this.result.payroll_voucher.payment_ids.length ? this.result.payroll_voucher : null; },
+          reprintVouchers: async function () {
+            if (!this.voucher || this.voucherBusy) return;
+            this.voucherBusy = true;
+            try {
+              for (var i = 0; i < this.voucher.payment_ids.length; i++) {
+                var res = await fetch('/api/payments/' + this.voucher.payment_ids[i] + '/voucher', { method: 'POST' });
+                if (!res.ok) { toast((await res.text()) || 'No se pudo imprimir el vale', 'error'); return; }
+              }
+              toast('Vale de nómina impreso');
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            } finally {
+              this.voucherBusy = false;
+            }
+          },
+          // Estado de impresión por cuenta: { state: 'printing' | 'ok' | 'error', text }
+          printStatus: {},
+          printTicket: async function (billId) {
+            if (this.printStatus[billId] && this.printStatus[billId].state === 'printing') return;
+            this.printStatus[billId] = { state: 'printing', text: 'Imprimiendo…' };
+            try {
+              var res = await fetch('/api/bills/' + billId + '/print', { method: 'POST' });
+              if (!res.ok) {
+                this.printStatus[billId] = { state: 'error', text: (await res.text()) || 'No se pudo imprimir' };
+                return;
+              }
+              var out = await res.json();
+              this.printStatus[billId] = { state: 'ok', text: 'Ticket enviado a ' + out.printer };
+            } catch (e) {
+              this.printStatus[billId] = { state: 'error', text: 'No se pudo conectar con el servidor' };
+            }
+          },
+          printLabel: function (billId, idle) {
+            var st = this.printStatus[billId];
+            if (!st) return idle;
+            if (st.state === 'printing') return 'Imprimiendo…';
+            if (st.state === 'ok') return '✔ Reimprimir';
+            return '↻ Reintentar';
+          },
+          // Versión del ticket para el navegador (respaldo si falla la térmica).
+          viewTicket: function (billId) {
+            window.open('/tickets/' + billId, '_blank');
+          },
+          reload: async function () {
+            try {
+              var res = await fetch('/api/orders/' + this.data.order_id + '/checkout');
+              if (!res.ok) { this.error = 'No se pudo recargar la orden'; return; }
+              this.data = await res.json();
+            } catch (e) {
+              this.error = 'No se pudo conectar con el servidor';
+              return;
+            }
+            this.selected = this.data.items.map(function (i) { return i.id; });
+            this.take = {};
+            this.payments = [];
+            this.draft = { method: 'CASH', amount: '', received: '', reference: '', collaborator_id: '' };
+            this.splitN = 1;
+            this.setDiscount('');
+            this.discountReason = '';
+            this.setTip(0);
+            this.result = null;
+            this.error = '';
+          },
+
+          openVoid: function (item) { this.modal = 'void'; this.modalItem = item; this.modalReason = ''; this.modalError = ''; },
+          openCancel: function () { this.modal = 'cancel'; this.modalItem = null; this.modalReason = ''; this.modalError = ''; },
+          submitModal: async function () {
+            var reason = this.modalReason.trim();
+            if (!reason) { this.modalError = 'Indica el motivo'; return; }
+            var url = this.modal === 'void'
+              ? '/api/order-items/' + this.modalItem.id + '/void'
+              : '/api/orders/' + this.data.order_id + '/cancel';
+            this.modalBusy = true;
+            try {
+              var res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason: reason })
+              });
+              if (!res.ok) { this.modalError = await res.text(); return; }
+              var out = await res.json();
+              this.modal = null;
+              if (out.order_status !== 'ACTIVE') {
+                location.href = this.backUrl;
+                return;
+              }
+              await this.reload();
+            } catch (e) {
+              this.modalError = 'No se pudo conectar con el servidor';
+            } finally {
+              this.modalBusy = false;
+            }
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+  </head>
+  <body
+    class="bg-gray-100 min-h-screen lg:h-screen font-sans antialiased lg:overflow-hidden"
+    x-data="checkoutApp(window.__CHECKOUT__, window.__METHODS__)"
+  >
+    <!-- Header -->
+    <header class="bg-slate-900 text-white px-4 py-3 shadow-md flex justify-between items-center gap-4 h-16">
+      <div class="flex items-center gap-4 min-w-0">
+        <a :href="backUrl" class="shrink-0 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition">← Volver</a>
+        <div class="min-w-0">
+          <p class="text-[10px] uppercase font-mono font-bold tracking-wider text-slate-400">
+            Cobro · Orden #<span x-text="data.order_id"></span>
+          </p>
+          <h1 class="text-lg font-black leading-tight truncate" x-text="orderTitle"></h1>
+        </div>
+        <span class="shrink-0 text-xs bg-slate-800 px-2.5 py-1 rounded-full font-bold" x-text="orderTypeLabel"></span>
+      </div>
+      <div class="shrink-0 flex items-center gap-4">
+        <button
+          x-show="data.status === 'ACTIVE' && data.bills.length === 0"
+          @click="openCancel()"
+          class="text-xs text-rose-300 hover:text-rose-200 font-semibold"
+        >
+          Cancelar orden
+        </button>
+        <button
+          @click="openDrawer()"
+          :disabled="drawerBusy"
+          class="bg-amber-500 hover:bg-amber-400 text-slate-950 px-4 py-2 rounded-xl text-xs font-black transition disabled:opacity-50"
+          x-text="drawerBusy ? 'Abriendo…' : '🔓 Abrir cajón'"
+        ></button>
+      </div>
+    </header>
+
+    <!-- Orden cerrada -->
+    <template x-if="data.status !== 'ACTIVE'">
+      <div class="max-w-md mx-auto mt-16 bg-white rounded-2xl shadow-sm border border-gray-200 p-8 text-center">
+        <p class="text-4xl mb-3" x-text="data.status === 'PAID' ? '✅' : '🚫'"></p>
+        <h2 class="text-xl font-black text-gray-900" x-text="data.status === 'PAID' ? 'Esta orden ya está pagada' : 'Esta orden fue cancelada'"></h2>
+        <div class="mt-5 space-y-2">
+          <template x-for="b in data.bills" :key="b.id">
+            <div>
+              <button @click="printTicket(b.id)" class="w-full bg-slate-100 hover:bg-slate-200 py-2 rounded-xl text-sm font-bold">
+                🧾 Ticket cuenta <span x-text="b.bill_number"></span> · <span x-text="fmt(c(b.total) + c(b.tip))"></span>
+                <span x-show="printStatus[b.id]" class="font-normal text-gray-500">· <span x-text="printLabel(b.id, '')"></span></span>
+              </button>
+              <p x-show="printStatus[b.id] && printStatus[b.id].state === 'error'" class="text-xs text-rose-600 mt-1">
+                <span x-text="printStatus[b.id] && printStatus[b.id].text"></span>
+                · <button @click="viewTicket(b.id)" class="underline">Ver en pantalla</button>
+              </p>
+            </div>
+          </template>
+        </div>
+        <a :href="backUrl" class="mt-5 inline-block text-sm font-bold text-slate-700 hover:underline">← Volver</a>
+      </div>
+    </template>
+
+    <!-- Pantalla de cobro -->
+    <main
+      x-show="data.status === 'ACTIVE'"
+      class="grid grid-cols-1 lg:grid-cols-3 lg:h-[calc(100vh-64px)]"
+    >
+      <!-- Columna 1: Productos -->
+      <section class="bg-white border-r border-gray-200 p-5 flex flex-col lg:overflow-hidden">
+        <div class="flex justify-between items-center mb-3">
+          <h2 class="text-sm font-bold text-gray-700">Productos por cobrar</h2>
+          <button
+            x-show="data.items.length > 1"
+            @click="allSelected ? selectNone() : selectAll()"
+            class="text-xs text-slate-600 hover:underline"
+            x-text="allSelected ? 'Quitar todos' : 'Seleccionar todos'"
+          ></button>
+        </div>
+        <p x-show="data.items.length > 1" class="text-[11px] text-gray-400 -mt-2 mb-3">
+          Para dividir la cuenta, desmarca lo que se cobrará después; en productos repetidos elige cuántas piezas cobrar.
+        </p>
+
+        <div x-show="hasGuests && data.items.length" class="flex flex-wrap gap-1.5 mb-3">
+          <button @click="selectAll()" :class="allSelected ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-gray-700 border-gray-200'"
+            class="text-xs font-bold px-2.5 py-1.5 rounded-lg border">Todas</button>
+          <template x-for="tab in guestTabs" :key="tab.pos">
+            <button @click="selectGuest(tab)"
+              :class="isGuestSelected(tab) && !allSelected ? 'bg-sky-700 text-white border-sky-700' : 'bg-white text-sky-800 border-sky-200'"
+              class="text-xs font-bold px-2.5 py-1.5 rounded-lg border">
+              <span x-text="tab.label"></span> <span class="font-mono opacity-70" x-text="fmt(tab.totalC)"></span>
+            </button>
+          </template>
+        </div>
+
+        <div class="space-y-2 lg:overflow-y-auto lg:flex-1 pr-1">
+          <template x-for="item in data.items" :key="item.id">
+            <div
+              @click="toggle(item.id)"
+              :class="isSelected(item.id) ? 'border-emerald-400 bg-emerald-50' : 'border-gray-200 bg-gray-50 opacity-60'"
+              class="p-3 rounded-xl border cursor-pointer select-none transition flex gap-3 items-start"
+            >
+              <span
+                :class="isSelected(item.id) ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-gray-300 text-transparent'"
+                class="mt-0.5 w-5 h-5 shrink-0 rounded-md border-2 flex items-center justify-center text-xs font-black"
+              >✓</span>
+              <div class="flex-1 min-w-0">
+                <div class="flex justify-between gap-2">
+                  <span class="text-sm font-bold text-gray-800">
+                    <span x-text="item.quantity"></span>× <span x-text="item.product_name"></span>
+                  </span>
+                  <span class="text-sm font-mono font-bold text-gray-900 text-right">
+                    <span x-text="fmt(isSelected(item.id) ? selLineC(item) : lineC(item))"></span>
+                    <span x-show="isSelected(item.id) && takeOf(item) < item.quantity" class="block text-[10px] font-sans font-semibold text-gray-400"
+                      x-text="'de ' + fmt(lineC(item))"></span>
+                  </span>
+                </div>
+                <!-- Cobrar solo algunas piezas de un renglón repetido -->
+                <div x-show="isSelected(item.id) && item.quantity > 1" @click.stop class="flex items-center gap-2 mt-1.5 text-xs">
+                  <span class="text-gray-500 font-semibold">Cobrar</span>
+                  <button type="button" @click="setTake(item, takeOf(item) - 1)" :disabled="takeOf(item) <= 1"
+                    class="w-7 h-7 rounded-lg bg-white border border-emerald-300 font-black text-emerald-800 disabled:opacity-50">−</button>
+                  <span class="font-mono font-black text-gray-900"><span x-text="takeOf(item)"></span> de <span x-text="item.quantity"></span></span>
+                  <button type="button" @click="setTake(item, takeOf(item) + 1)" :disabled="takeOf(item) >= item.quantity"
+                    class="w-7 h-7 rounded-lg bg-white border border-emerald-300 font-black text-emerald-800 disabled:opacity-50">+</button>
+                </div>
+                <p x-show="item.modifiers" class="text-[11px] font-semibold text-sky-800" x-text="'+ ' + item.modifiers"></p>
+                <p x-show="hasGuests" class="text-[10px] font-black uppercase tracking-wider text-sky-700" x-text="item.guest || 'Mesa'"></p>
+                <div class="flex justify-between gap-2 mt-0.5">
+                  <span class="text-[11px] text-gray-500 truncate" x-text="item.notes || (fmt(c(item.unit_price)) + ' c/u')"></span>
+                  <span class="flex gap-3 shrink-0">
+                    <button x-show="data.order_type !== 'FLASH'" @click.stop="openMove(item)" class="text-[11px] text-sky-700 hover:underline font-semibold">Mover</button>
+                    <button @click.stop="openEdit(item)" class="text-[11px] text-slate-600 hover:underline font-semibold">Editar</button>
+                    <button @click.stop="openVoid(item)" class="text-[11px] text-rose-500 hover:underline">Anular</button>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </template>
+          <p x-show="data.items.length === 0" class="text-xs text-gray-400 italic text-center py-10">
+            No hay productos pendientes de cobro.
+          </p>
+          <button x-show="data.status === 'ACTIVE'" @click="openAdd()"
+            class="w-full py-2 rounded-xl border-2 border-dashed border-gray-300 hover:border-gray-400 text-xs font-bold text-gray-600">+ Agregar producto a la orden</button>
+        </div>
+
+        <div x-show="data.bills.length > 0" class="mt-4 pt-3 border-t border-gray-100">
+          <h3 class="text-xs font-bold uppercase tracking-wider text-gray-400 mb-2">Cuentas ya cobradas</h3>
+          <template x-for="b in data.bills" :key="b.id">
+            <div class="flex justify-between items-center text-xs py-1">
+              <span class="font-semibold text-gray-700">Cuenta <span x-text="b.bill_number"></span></span>
+              <span class="flex items-center gap-3">
+                <span class="font-mono font-bold" x-text="fmt(c(b.total) + c(b.tip))"></span>
+                <button
+                  @click="printTicket(b.id)"
+                  :title="printStatus[b.id] ? printStatus[b.id].text : 'Imprimir ticket'"
+                  :class="printStatus[b.id] && printStatus[b.id].state === 'error' ? 'text-rose-600' : 'text-slate-600'"
+                  class="hover:underline"
+                  x-text="'🧾 ' + printLabel(b.id, 'Ticket')"
+                ></button>
+              </span>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- Columna 2: Cliente, descuento, propina, resumen -->
+      <section class="p-5 space-y-5 lg:overflow-y-auto border-r border-gray-200">
+        <!-- Cliente -->
+        <div>
+          <label class="text-xs font-bold uppercase tracking-wider text-gray-400 block mb-2">Cliente</label>
+          <div class="relative">
+            <input
+              type="text"
+              x-model="customerQuery"
+              @input.debounce.300ms="searchCustomers()"
+              @keydown.escape="customerResults = []"
+              placeholder="Nombre, teléfono o RFC (opcional)"
+              class="w-full text-sm p-2.5 rounded-xl border border-gray-300 bg-white focus:outline-none focus:ring-2 focus:ring-slate-400"
+            />
+            <button
+              x-show="customerQuery"
+              @click="clearCustomer()"
+              class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 text-sm px-1"
+            >✕</button>
+            <div
+              x-show="customerResults.length > 0"
+              @click.outside="customerResults = []"
+              class="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden"
+            >
+              <template x-for="cu in customerResults" :key="cu.id">
+                <button @click="pickCustomer(cu)" class="w-full text-left px-3 py-2 hover:bg-gray-50 border-b border-gray-100 last:border-0">
+                  <span class="block text-sm font-bold text-gray-800" x-text="cu.name"></span>
+                  <span class="block text-[11px] text-gray-500" x-text="[cu.phone, cu.email, cu.rfc].filter(Boolean).join(' · ')"></span>
+                </button>
+              </template>
+            </div>
+          </div>
+          <p x-show="customerId" class="text-[11px] text-emerald-700 font-semibold mt-1">✔ Cliente registrado</p>
+
+          <div x-show="!customerId && customerQuery.trim()" class="mt-2">
+            <label class="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
+              <input type="checkbox" x-model="saveCustomer" class="rounded" />
+              Guardar como cliente nuevo
+            </label>
+            <div x-show="saveCustomer" class="grid grid-cols-2 gap-2 mt-2">
+              <input type="tel" x-model="newCustomer.phone" placeholder="Teléfono" class="text-sm p-2 rounded-lg border border-gray-300 bg-white focus:outline-none" />
+              <input type="email" x-model="newCustomer.email" placeholder="Correo" class="text-sm p-2 rounded-lg border border-gray-300 bg-white focus:outline-none" />
+              <input type="text" x-model="newCustomer.rfc" placeholder="RFC (para factura)" class="col-span-2 text-sm p-2 rounded-lg border border-gray-300 bg-white uppercase focus:outline-none" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Descuento -->
+        <div>
+          <label class="text-xs font-bold uppercase tracking-wider text-gray-400 block mb-2">Descuento</label>
+          <div class="grid grid-cols-5 gap-1.5">
+            <button @click="setDiscount('')" :class="discountType === '' ? 'bg-slate-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'" class="py-2 rounded-lg border border-gray-200 text-xs font-bold transition">Ninguno</button>
+            <template x-for="p in [10, 15, 20]" :key="p">
+              <button
+                @click="setDiscount('PERCENT', p)"
+                :class="discountType === 'PERCENT' && Number(discountValue) === p ? 'bg-slate-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'"
+                class="py-2 rounded-lg border border-gray-200 text-xs font-bold transition"
+                x-text="p + '%'"
+              ></button>
+            </template>
+            <button @click="setDiscount('PERCENT', 100)" :class="discountType === 'PERCENT' && Number(discountValue) === 100 ? 'bg-slate-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'" class="py-2 rounded-lg border border-gray-200 text-xs font-bold transition">Cortesía</button>
+          </div>
+          <button x-show="data.settings.staff_discount_pct > 0" @click="applyStaffDiscount()"
+            :class="discountReason === 'Colaborador' && discountType === 'PERCENT' && Number(discountValue) === data.settings.staff_discount_pct ? 'bg-slate-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'"
+            class="mt-1.5 w-full py-2 rounded-lg border border-gray-200 text-xs font-bold transition"
+            x-text="'🧑‍🍳 Colaborador ' + data.settings.staff_discount_pct + '%'"></button>
+          <div class="grid grid-cols-2 gap-2 mt-2">
+            <div class="flex rounded-lg border border-gray-300 bg-white overflow-hidden">
+              <span class="px-2.5 flex items-center text-xs font-bold text-gray-500 bg-gray-50 border-r border-gray-200">%</span>
+              <input
+                type="number" min="0" max="100" step="any" inputmode="decimal"
+                :value="discountType === 'PERCENT' ? discountValue : ''"
+                @input="setDiscount('PERCENT', $event.target.value)"
+                placeholder="Otro %"
+                class="w-full text-sm p-2 focus:outline-none"
+              />
+            </div>
+            <div class="flex rounded-lg border border-gray-300 bg-white overflow-hidden">
+              <span class="px-2.5 flex items-center text-xs font-bold text-gray-500 bg-gray-50 border-r border-gray-200">$</span>
+              <input
+                type="number" min="0" step="any" inputmode="decimal"
+                :value="discountType === 'AMOUNT' ? discountValue : ''"
+                @input="setDiscount('AMOUNT', $event.target.value)"
+                placeholder="Monto"
+                class="w-full text-sm p-2 focus:outline-none"
+              />
+            </div>
+          </div>
+          <input
+            x-show="discountC > 0"
+            type="text"
+            x-model="discountReason"
+            placeholder="Motivo del descuento (ej. cliente frecuente, promoción)"
+            class="w-full mt-2 text-sm p-2 rounded-lg border border-gray-300 bg-white focus:outline-none"
+          />
+          <p x-show="discountError" class="text-xs text-rose-600 font-semibold mt-1" x-text="discountError"></p>
+        </div>
+
+        <!-- Propina -->
+        <div>
+          <label class="text-xs font-bold uppercase tracking-wider text-gray-400 block mb-2">Propina</label>
+          <div class="grid grid-cols-5 gap-1.5">
+            <template x-for="p in [0, 10, 15, 20]" :key="p">
+              <button
+                @click="setTip(p)"
+                :class="tipMode === 'PERCENT' && tipPercent === p ? 'bg-slate-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'"
+                class="py-2 rounded-lg border border-gray-200 text-xs font-bold transition"
+                x-text="p === 0 ? 'Sin' : p + '%'"
+              ></button>
+            </template>
+            <button @click="tipMode = 'CUSTOM'" :class="tipMode === 'CUSTOM' ? 'bg-slate-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'" class="py-2 rounded-lg border border-gray-200 text-xs font-bold transition">Otra</button>
+          </div>
+          <div x-show="tipMode === 'CUSTOM'" class="flex rounded-lg border border-gray-300 bg-white overflow-hidden mt-2">
+            <span class="px-2.5 flex items-center text-xs font-bold text-gray-500 bg-gray-50 border-r border-gray-200">$</span>
+            <input type="number" min="0" step="any" inputmode="decimal" x-model="tipCustom" placeholder="Monto de propina" class="w-full text-sm p-2 focus:outline-none" />
+          </div>
+        </div>
+
+        <!-- Resumen -->
+        <div class="bg-white rounded-2xl border border-gray-200 p-4 space-y-1.5 text-sm">
+          <div class="flex justify-between text-gray-600">
+            <span>Subtotal (<span x-text="selected.length"></span> de <span x-text="data.items.length"></span> productos)</span>
+            <span class="font-mono" x-text="fmt(itemsC)"></span>
+          </div>
+          <div x-show="discountC > 0" class="flex justify-between text-rose-600">
+            <span>Descuento<span x-show="discountType === 'PERCENT'"> (<span x-text="discountValue"></span>%)</span></span>
+            <span class="font-mono" x-text="'-' + fmt(discountC)"></span>
+          </div>
+          <template x-if="!data.settings.prices_include_tax">
+            <div class="flex justify-between text-gray-600">
+              <span>IVA <span x-text="taxPercent"></span>%</span>
+              <span class="font-mono" x-text="fmt(taxC)"></span>
+            </div>
+          </template>
+          <div class="flex justify-between font-bold text-gray-900 pt-1.5 border-t border-gray-100">
+            <span>Total</span>
+            <span class="font-mono" x-text="fmt(totalC)"></span>
+          </div>
+          <div x-show="data.settings.prices_include_tax" class="flex justify-between text-[11px] text-gray-400">
+            <span>IVA incluido (<span x-text="taxPercent"></span>%)</span>
+            <span class="font-mono" x-text="fmt(taxC)"></span>
+          </div>
+          <div x-show="tipC > 0" class="flex justify-between text-gray-600">
+            <span>Propina</span>
+            <span class="font-mono" x-text="fmt(tipC)"></span>
+          </div>
+          <div class="flex justify-between items-baseline pt-2 border-t border-gray-100">
+            <span class="text-xs font-bold text-gray-500 uppercase">A cobrar</span>
+            <span class="text-2xl font-black font-mono text-gray-900" x-text="fmt(grandC)"></span>
+          </div>
+        </div>
+        <button
+          x-show="data.status === 'ACTIVE' && data.items.length"
+          @click="printPreBill()"
+          :disabled="preBillBusy"
+          title="Imprime lo seleccionado con el descuento aplicado, para llevarlo a la mesa. No registra el cobro."
+          class="w-full bg-white border-2 border-gray-300 hover:border-gray-400 text-slate-800 py-2.5 rounded-xl font-bold text-sm disabled:opacity-50"
+          x-text="preBillBusy ? 'Imprimiendo…' : '🧾 Imprimir pre-cuenta'"
+        ></button>
+      </section>
+
+      <!-- Columna 3: Pagos -->
+      <section class="p-5 flex flex-col bg-white lg:overflow-hidden">
+        <div class="lg:overflow-y-auto lg:flex-1 space-y-4 pr-1">
+          <div>
+            <label class="text-xs font-bold uppercase tracking-wider text-gray-400 block mb-2">Método de pago</label>
+            <div class="grid grid-cols-3 gap-1.5">
+              <template x-for="m in methodOrder" :key="m">
+                <button
+                  @click="selectMethod(m)"
+                  :class="draft.method === m ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'"
+                  class="py-2.5 px-1 rounded-lg border text-[11px] font-bold transition leading-tight"
+                >
+                  <span x-text="methodIcons[m]"></span><br /><span x-text="methods[m]"></span>
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <!-- Dividir en partes iguales -->
+          <div class="flex items-center justify-between bg-gray-50 rounded-xl px-3 py-2">
+            <span class="text-xs font-semibold text-gray-600">Dividir en partes iguales</span>
+            <div class="flex items-center gap-2">
+              <button @click="setSplit(splitN - 1)" class="w-7 h-7 bg-white border border-gray-200 rounded-lg font-bold text-sm">−</button>
+              <span class="text-sm font-bold w-5 text-center" x-text="splitN"></span>
+              <button @click="setSplit(splitN + 1)" class="w-7 h-7 bg-white border border-gray-200 rounded-lg font-bold text-sm">+</button>
+            </div>
+          </div>
+          <p x-show="splitN > 1" class="text-xs text-gray-500 -mt-2">
+            <span x-text="splitN"></span> pagos de <span class="font-mono font-bold" x-text="fmt(splitShareC)"></span>
+          </p>
+
+          <!-- Monto -->
+          <div class="grid gap-2" :class="draft.method === 'CASH' ? 'grid-cols-2' : 'grid-cols-1'">
+            <div>
+              <label class="text-[11px] font-semibold text-gray-500 block mb-1">Monto a aplicar</label>
+              <div class="flex rounded-lg border border-gray-300 bg-white overflow-hidden">
+                <span class="px-2.5 flex items-center text-xs font-bold text-gray-500 bg-gray-50 border-r border-gray-200">$</span>
+                <input
+                  type="number" min="0" step="any" inputmode="decimal"
+                  x-model="draft.amount"
+                  :placeholder="(autoAmountC / 100).toFixed(2)"
+                  class="w-full text-sm p-2 font-mono focus:outline-none"
+                />
+              </div>
+            </div>
+            <div x-show="draft.method === 'CASH'">
+              <label class="text-[11px] font-semibold text-gray-500 block mb-1">Efectivo recibido</label>
+              <div class="flex rounded-lg border border-gray-300 bg-white overflow-hidden">
+                <span class="px-2.5 flex items-center text-xs font-bold text-gray-500 bg-gray-50 border-r border-gray-200">$</span>
+                <input
+                  type="number" min="0" step="any" inputmode="decimal"
+                  x-model="draft.received"
+                  :placeholder="(Math.max(0, draftAmountC) / 100).toFixed(2)"
+                  class="w-full text-sm p-2 font-mono focus:outline-none"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div x-show="draft.method === 'CASH' && remainingC > 0" class="flex flex-wrap gap-1.5">
+            <template x-for="(v, i) in cashSuggestions" :key="v">
+              <button
+                @click="draft.received = (v / 100).toFixed(2)"
+                class="px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-mono font-bold"
+                x-text="i === 0 ? 'Exacto' : fmt(v)"
+              ></button>
+            </template>
+          </div>
+
+          <div x-show="draft.method === 'PAYROLL'">
+            <label class="text-[11px] font-semibold text-gray-500 block mb-1">¿A quién se le descuenta?</label>
+            <select x-model="draft.collaborator_id"
+              class="w-full text-sm p-2 rounded-lg border border-gray-300 bg-white focus:outline-none">
+              <option value="">Elige al colaborador…</option>
+              <template x-for="c in collaborators" :key="c.id">
+                <option :value="c.id" x-text="c.name + (c.weekly_limit ? ' (tope ' + fmt(c.weekly_limit * 100) + '/sem)' : '')"></option>
+              </template>
+            </select>
+            <p x-show="!collaborators.length" class="text-[11px] text-gray-400 mt-1">No hay colaboradores. Agrégalos en Admin → Nómina.</p>
+          </div>
+
+          <div x-show="draft.method !== 'CASH' && draft.method !== 'PAYROLL'">
+            <input
+              type="text"
+              x-model="draft.reference"
+              placeholder="Referencia / autorización / últimos 4 dígitos (opcional)"
+              class="w-full text-sm p-2 rounded-lg border border-gray-300 bg-white focus:outline-none"
+            />
+          </div>
+
+          <div x-show="draftChangeC > 0" class="flex justify-between items-center bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+            <span class="text-xs font-bold text-amber-900">Cambio</span>
+            <span class="text-lg font-black font-mono text-amber-900" x-text="fmt(draftChangeC)"></span>
+          </div>
+
+          <p x-show="draftError" class="text-xs text-rose-600 font-semibold" x-text="draftError"></p>
+
+          <button
+            @click="addPayment()"
+            :disabled="!canAddPayment"
+            :class="canAddPayment ? 'bg-slate-900 hover:bg-slate-800 text-white' : 'bg-gray-100 text-gray-400 cursor-not-allowed'"
+            class="w-full py-2.5 rounded-xl text-sm font-bold transition"
+          >
+            + Agregar pago de <span x-text="fmt(Math.max(0, draftAmountC))"></span>
+          </button>
+
+          <!-- Pagos registrados -->
+          <div x-show="payments.length > 0" class="space-y-1.5">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-gray-400">Pagos</h3>
+            <template x-for="(p, i) in payments" :key="i">
+              <div class="flex justify-between items-center bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+                <div class="min-w-0">
+                  <span class="text-sm font-bold text-gray-800"><span x-text="methodIcons[p.method]"></span> <span x-text="methods[p.method]"></span></span>
+                  <span x-show="p.changeC > 0" class="block text-[11px] text-gray-500">
+                    Recibido <span x-text="fmt(p.receivedC)"></span> · cambio <span x-text="fmt(p.changeC)"></span>
+                  </span>
+                  <span x-show="p.reference" class="block text-[11px] text-gray-500 truncate" x-text="'Ref. ' + p.reference"></span>
+                  <span x-show="p.method === 'PAYROLL'" class="block text-[11px] font-semibold text-sky-800 truncate" x-text="'A: ' + collaboratorName(p.collaborator_id)"></span>
+                </div>
+                <div class="flex items-center gap-3 shrink-0">
+                  <span class="text-sm font-mono font-bold" x-text="fmt(p.amountC)"></span>
+                  <button @click="removePayment(i)" class="text-rose-500 hover:text-rose-700 text-sm">✕</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Confirmar -->
+        <div class="border-t border-gray-100 pt-3 mt-3 space-y-2">
+          <div class="flex justify-between text-sm">
+            <span class="font-semibold text-gray-500">Pagado</span>
+            <span class="font-mono font-bold" x-text="fmt(paidC)"></span>
+          </div>
+          <div class="flex justify-between text-sm">
+            <span class="font-semibold text-gray-500" x-text="remainingC < 0 ? 'Excedente' : 'Pendiente'"></span>
+            <span class="font-mono font-bold" :class="remainingC === 0 ? 'text-emerald-600' : 'text-rose-600'" x-text="fmt(Math.abs(remainingC))"></span>
+          </div>
+          <div x-show="changeC > 0" class="flex justify-between text-sm">
+            <span class="font-semibold text-amber-700">Cambio a entregar</span>
+            <span class="font-mono font-black text-amber-700" x-text="fmt(changeC)"></span>
+          </div>
+
+          <p x-show="error" class="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg p-2 font-semibold" x-text="error"></p>
+          <p x-show="!error && blockers.length > 0" class="text-[11px] text-gray-400" x-text="blockers[0]"></p>
+
+          <button
+            @click="confirm()"
+            :disabled="!canConfirm"
+            :class="canConfirm ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-gray-200 text-gray-400 cursor-not-allowed'"
+            class="w-full py-3.5 rounded-xl font-black text-base shadow transition"
+          >
+            <span x-show="!submitting">✔ Confirmar cobro <span x-text="fmt(grandC)"></span></span>
+            <span x-show="submitting">Procesando…</span>
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <!-- Resultado del cobro -->
+    <div x-show="result" x-cloak class="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-20">
+      <div class="bg-white rounded-3xl shadow-xl w-full max-w-sm p-7 text-center">
+        <p class="text-5xl mb-2">✅</p>
+        <h2 class="text-xl font-black text-gray-900">Cobro registrado</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Cuenta <span x-text="result && result.bill_number"></span> · <span class="font-mono" x-text="result && fmt(c(result.total))"></span>
+        </p>
+
+        <div x-show="result && result.change > 0" class="mt-5 bg-amber-50 border border-amber-200 rounded-2xl py-4">
+          <p class="text-xs font-bold uppercase tracking-wider text-amber-800">Cambio a entregar</p>
+          <p class="text-4xl font-black font-mono text-amber-900" x-text="result && fmt(c(result.change))"></p>
+        </div>
+
+        <div x-show="voucher" class="mt-4 bg-sky-50 border border-sky-200 rounded-2xl px-4 py-3 text-left">
+          <p class="text-xs font-black text-sky-900">🧑‍🍳 Cargo a nómina</p>
+          <p class="text-xs text-sky-900 mt-0.5" x-show="voucher && voucher.printed && voucher.printed.length">
+            Vale impreso en <span x-text="voucher && voucher.printed && voucher.printed.join(', ')"></span>. Pide la firma del colaborador y guárdalo.
+          </p>
+          <p class="text-xs font-semibold text-rose-600 mt-0.5" x-show="voucher && (!voucher.printed || !voucher.printed.length)">
+            No se pudo imprimir el vale<span x-text="voucher && voucher.failed && voucher.failed.length ? ': ' + voucher.failed.join('; ') : ''"></span>
+          </p>
+          <button @click="reprintVouchers()" :disabled="voucherBusy" class="mt-2 text-xs font-bold text-sky-900 underline disabled:opacity-50"
+            x-text="voucherBusy ? 'Imprimiendo…' : 'Reimprimir vale'"></button>
+        </div>
+
+        <p x-show="result && !result.order_closed" class="mt-4 text-xs text-gray-500">
+          Quedan <span class="font-bold" x-text="result && result.remaining_items"></span> productos pendientes de cobro en esta orden.
+        </p>
+
+        <div class="mt-6 space-y-2">
+          <button
+            @click="openDrawer()"
+            :disabled="drawerBusy"
+            class="w-full bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 py-3 rounded-xl font-black text-sm"
+            x-text="drawerBusy ? 'Abriendo cajón…' : '🔓 Abrir cajón'"
+          ></button>
+          <button
+            @click="printTicket(result.bill_id)"
+            :disabled="!!(result && printStatus[result.bill_id] && printStatus[result.bill_id].state === 'printing')"
+            class="w-full bg-slate-900 hover:bg-slate-800 disabled:bg-slate-500 text-white py-3 rounded-xl font-bold text-sm"
+            x-text="'🧾 ' + (result ? printLabel(result.bill_id, 'Imprimir ticket') : '')"
+          ></button>
+          <template x-if="result && printStatus[result.bill_id] && printStatus[result.bill_id].state !== 'printing'">
+            <p
+              class="text-xs font-semibold"
+              :class="printStatus[result.bill_id].state === 'ok' ? 'text-emerald-700' : 'text-rose-600'"
+            >
+              <span x-text="printStatus[result.bill_id].text"></span>
+              <template x-if="printStatus[result.bill_id].state === 'error'">
+                <span>· <button @click="viewTicket(result.bill_id)" class="underline">Ver en pantalla</button></span>
+              </template>
+            </p>
+          </template>
+          <button x-show="result && !result.order_closed" @click="reload()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-xl font-bold text-sm">Cobrar lo restante</button>
+          <a :href="backUrl" class="block w-full bg-gray-100 hover:bg-gray-200 text-gray-800 py-3 rounded-xl font-bold text-sm">Listo</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: anular producto / cancelar orden -->
+    <div x-show="modal" x-cloak class="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-30" @keydown.escape.window="modal = null">
+      <div class="bg-white rounded-3xl shadow-xl w-full max-w-sm p-6" @click.outside="modal = null">
+        <h2 class="text-lg font-black text-gray-900" x-text="modal === 'void' ? 'Anular producto' : 'Cancelar orden'"></h2>
+        <p class="text-sm text-gray-500 mt-1">
+          <template x-if="modal === 'void' && modalItem">
+            <span><span x-text="modalItem.quantity"></span>× <span x-text="modalItem.product_name"></span> · <span x-text="fmt(lineC(modalItem))"></span></span>
+          </template>
+          <template x-if="modal === 'cancel'">
+            <span>Se cancelará la orden completa y se liberará la mesa.</span>
+          </template>
+        </p>
+        <input
+          type="text"
+          x-model="modalReason"
+          @keydown.enter="submitModal()"
+          placeholder="Motivo (obligatorio)"
+          class="w-full mt-4 text-sm p-2.5 rounded-xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-rose-300"
+        />
+        <p x-show="modalError" class="text-xs text-rose-600 font-semibold mt-2" x-text="modalError"></p>
+        <div class="flex gap-2 mt-5">
+          <button @click="modal = null" class="flex-1 bg-gray-100 hover:bg-gray-200 py-2.5 rounded-xl text-sm font-bold">Volver</button>
+          <button
+            @click="submitModal()"
+            :disabled="modalBusy"
+            class="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-2.5 rounded-xl text-sm font-bold"
+            x-text="modal === 'void' ? 'Anular' : 'Cancelar orden'"
+          ></button>
+        </div>
+      </div>
+    </div>
+    <!-- Mover un producto a otra persona -->
+    <div x-show="mv" x-cloak @click.self="mv = null" class="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-30">
+      <template x-if="mv">
+        <form @submit.prevent="saveMove()" class="bg-white rounded-2xl w-full max-w-sm p-6 space-y-3 shadow-2xl">
+          <h2 class="text-lg font-black text-gray-900">Mover a otra persona</h2>
+          <p class="text-xs text-gray-500" x-text="mv.item.quantity + '× ' + mv.item.product_name + ' · ahora es de ' + (mv.item.guest || 'Mesa')"></p>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Pasar a</span>
+            <select x-model="mv.position" class="mt-1 w-full text-sm p-2 rounded-xl border border-gray-200 bg-white">
+              <option value="0">Mesa (todos)</option>
+              <template x-for="g in data.guests" :key="g.position"><option :value="String(g.position)" x-text="g.label"></option></template>
+              <option :value="String(nextGuestPos)" x-text="'+ Nueva persona (Persona ' + nextGuestPos + ')'"></option>
+            </select>
+          </label>
+          <input x-show="Number(mv.position) === nextGuestPos" type="text" x-model="mv.name" maxlength="30" placeholder="Nombre (opcional)"
+            class="w-full text-sm p-2 rounded-xl border border-gray-200" />
+          <div x-show="mv.item.quantity > 1" class="flex items-center gap-3 text-sm">
+            <span class="text-xs font-bold text-gray-700">Piezas</span>
+            <button type="button" @click="mv.quantity = Math.max(1, mv.quantity - 1)" class="w-8 h-8 rounded-lg border border-gray-200 font-black">−</button>
+            <span class="font-mono font-black" x-text="mv.quantity + ' de ' + mv.item.quantity"></span>
+            <button type="button" @click="mv.quantity = Math.min(mv.item.quantity, mv.quantity + 1)" class="w-8 h-8 rounded-lg border border-gray-200 font-black">+</button>
+          </div>
+          <div class="flex gap-2 pt-1">
+            <button type="button" @click="mv = null" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+            <button type="submit" :disabled="mv.busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">Mover</button>
+          </div>
+        </form>
+      </template>
+    </div>
+
+    <!-- Editar un producto / agregar productos -->
+    <div x-show="ed" x-cloak @click.self="ed = null" class="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-30">
+      <template x-if="ed">
+        <form @submit.prevent="saveEdit()" class="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 space-y-4 shadow-2xl">
+          <div class="flex justify-between items-start gap-3">
+            <div>
+              <h2 class="text-lg font-black text-gray-900" x-text="ed.mode === 'edit' ? 'Editar producto' : 'Agregar producto'"></h2>
+              <p x-show="ed.mode === 'edit'" class="text-xs text-gray-500">
+                Antes: <span x-text="ed.item.quantity + '× ' + ed.item.product_name + (ed.item.modifiers ? ' + ' + ed.item.modifiers : '')"></span>
+              </p>
+            </div>
+            <button type="button" @click="ed = null" class="text-gray-400 hover:text-gray-700 text-xl">✕</button>
+          </div>
+
+          <!-- Producto -->
+          <div>
+            <template x-if="edProduct && !ed.picking">
+              <div class="flex justify-between items-center gap-2 bg-gray-50 rounded-xl px-3 py-2">
+                <span>
+                  <span class="block font-bold text-gray-900" x-text="edProduct.name"></span>
+                  <span class="block text-[11px] text-gray-400" x-text="edProduct.where"></span>
+                </span>
+                <button type="button" @click="ed.picking = true" class="text-xs font-bold text-slate-700 underline">Cambiar producto</button>
+              </div>
+            </template>
+            <div x-show="ed.picking || !edProduct" class="space-y-2">
+              <input type="text" x-model="ed.q" placeholder="🔍 Buscar producto…" autocomplete="off"
+                class="w-full text-sm px-3 py-2 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-slate-400" />
+              <div class="max-h-48 overflow-y-auto divide-y divide-gray-100 border border-gray-100 rounded-xl">
+                <template x-for="p in edResults" :key="p.id">
+                  <button type="button" @click="pickProductForEdit(p)" class="w-full text-left px-3 py-2 hover:bg-gray-50 flex justify-between gap-2">
+                    <span class="min-w-0">
+                      <span class="block text-sm font-semibold text-gray-800" x-text="p.name"></span>
+                      <span class="block text-[11px] text-gray-400 truncate" x-text="p.where"></span>
+                    </span>
+                    <span class="text-xs font-mono text-emerald-700" x-text="fmt(c(p.price))"></span>
+                  </button>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <template x-if="edProduct && !ed.picking">
+            <div class="space-y-4">
+              <!-- Modificadores -->
+              <template x-for="g in edGroups" :key="g.id">
+                <div>
+                  <p class="text-xs font-bold text-gray-700 mb-1.5">
+                    <span x-text="g.name"></span>
+                    <span class="font-normal text-gray-400" x-text="g.min > 0 ? (g.max === 1 ? ' · elige 1' : ' · mínimo ' + g.min) : ' · opcional'"></span>
+                  </p>
+                  <div class="flex flex-wrap gap-1.5">
+                    <template x-for="o in g.options" :key="o.id">
+                      <button type="button" @click="toggleMod(g, o)"
+                        :class="ed.mods.indexOf(o.id) !== -1 ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-gray-700 border-gray-200 hover:border-gray-400'"
+                        class="text-xs font-semibold px-3 py-1.5 rounded-lg border">
+                        <span x-text="o.name"></span><span x-show="o.price_extra > 0" class="opacity-70" x-text="' +' + fmt(c(o.price_extra))"></span>
+                      </button>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <div class="flex items-center gap-3">
+                <span class="text-xs font-bold text-gray-700">Cantidad</span>
+                <button type="button" @click="ed.quantity = Math.max(1, ed.quantity - 1)" class="w-8 h-8 rounded-lg border border-gray-200 font-black">−</button>
+                <span class="font-mono font-black text-lg w-6 text-center" x-text="ed.quantity"></span>
+                <button type="button" @click="ed.quantity = Math.min(99, ed.quantity + 1)" class="w-8 h-8 rounded-lg border border-gray-200 font-black">+</button>
+                <span class="ml-auto font-mono font-black text-gray-900" x-text="fmt(edUnitC * ed.quantity)"></span>
+              </div>
+
+              <input type="text" x-model="ed.notes" placeholder="Nota para cocina/barra (opcional)"
+                class="w-full text-sm px-3 py-2 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-slate-400" />
+              <label x-show="ed.mode === 'add' && hasGuests" class="block">
+                <span class="text-xs font-bold text-gray-700">Para</span>
+                <select x-model="ed.guest" class="mt-1 w-full text-sm p-2 rounded-xl border border-gray-200 bg-white">
+                  <option value="0">Mesa (todos)</option>
+                  <template x-for="g in data.guests" :key="g.position"><option :value="g.position" x-text="g.label"></option></template>
+                </select>
+              </label>
+            </div>
+          </template>
+
+          <div class="pt-2 border-t border-gray-100 space-y-2">
+            <p class="text-[11px] text-gray-500">Caja autoriza con su PIN. La comanda sale con el cambio y queda registrado en la bitácora.</p>
+            <input type="password" inputmode="numeric" maxlength="6" autocomplete="off" x-model="ed.pin" placeholder="PIN de caja"
+              class="w-full p-3 text-lg font-mono tracking-widest border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-400" />
+            <p x-show="ed.error" x-text="ed.error" class="text-xs font-semibold text-rose-600"></p>
+            <div class="flex gap-2">
+              <button type="button" @click="ed = null" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+              <button type="submit" :disabled="ed.busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50"
+                x-text="ed.busy ? 'Guardando…' : (ed.mode === 'edit' ? 'Guardar cambio' : 'Agregar y enviar comanda')"></button>
+            </div>
+          </div>
+        </form>
+      </template>
+    </div>
+
+    <!-- PIN de caja para autorizar un cargo a nómina -->
+    <div x-show="pinModal" x-cloak @click.self="pinModal = false" class="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-30">
+      <form @submit.prevent="submitPin()" class="bg-white rounded-2xl w-full max-w-sm p-6 space-y-3 shadow-2xl">
+        <h2 class="text-lg font-black text-gray-900">🧑‍🍳 Autorizar cargo a nómina</h2>
+        <div class="text-xs text-gray-600 space-y-0.5">
+          <template x-for="(p, i) in payments.filter(function (x) { return x.method === 'PAYROLL'; })" :key="i">
+            <p><b x-text="collaboratorName(p.collaborator_id)"></b> · <span class="font-mono" x-text="fmt(p.amountC)"></span></p>
+          </template>
+        </div>
+        <p class="text-xs text-gray-500">Quien está en caja confirma con su PIN que el colaborador es correcto.</p>
+        <input x-ref="pinInput" type="password" inputmode="numeric" maxlength="6" autocomplete="off" x-model="payrollPin" placeholder="PIN de caja"
+          class="w-full p-3 text-lg font-mono tracking-widest border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-400" />
+        <p x-show="pinError" x-text="pinError" class="text-xs font-semibold text-rose-600"></p>
+        <div class="flex gap-2">
+          <button type="button" @click="pinModal = false; payrollPin = ''" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+          <button type="submit" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white">Autorizar y cobrar</button>
+        </div>
+      </form>
+    </div>
+  </body>
+</html>

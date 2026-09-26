@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Corte · Turno #{{.Session.ID}}</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script>
+      var SESSION_ID = {{.Session.ID}};
+
+      async function printReport() {
+        try {
+          var res = await fetch('/api/cash/sessions/' + SESSION_ID + '/print', { method: 'POST' });
+          if (!res.ok) { toast((await res.text()) || 'No se pudo imprimir', 'error'); return; }
+          var out = await res.json();
+          toast('Corte enviado a ' + out.printer);
+        } catch (e) {
+          toast('No se pudo conectar con el servidor', 'error');
+        }
+      }
+
+      async function addNote(form) {
+        var body = { pin: form.pin.value, note: form.note.value };
+        if (!body.note.trim()) { toast('Escribe la nota', 'warn'); return; }
+        if (!body.pin) { toast('Captura tu PIN', 'warn'); return; }
+        try {
+          var res = await fetch('/api/cash/sessions/' + SESSION_ID + '/notes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          if (!res.ok) { toast((await res.text()) || 'No se pudo guardar', 'error'); return; }
+          location.reload();
+        } catch (e) {
+          toast('No se pudo conectar con el servidor', 'error');
+        }
+      }
+
+      // Recién cerrado: se imprime el corte automáticamente una vez.
+      document.addEventListener('DOMContentLoaded', function () {
+        var params = new URLSearchParams(location.search);
+        if (params.get('print') === '1') {
+          history.replaceState(null, '', location.pathname);
+          toast('Turno cerrado');
+          printReport();
+        }
+      });
+    </script>
+    <style>
+      @media print {
+        header, .no-print { display: none !important; }
+        body { background: white !important; }
+        section { break-inside: avoid; box-shadow: none !important; }
+      }
+    </style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased">
+    <header class="bg-slate-900 text-white px-4 py-3 shadow-md flex items-center gap-4 h-16 sticky top-0 z-10">
+      <a href="/caja" class="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition">← Caja</a>
+      <div class="flex-1">
+        <p class="text-[10px] uppercase font-mono font-bold tracking-wider text-slate-400">Corte de caja</p>
+        <h1 class="text-lg font-black leading-tight">Turno #{{.Session.ID}}</h1>
+      </div>
+      <button onclick="printReport()" class="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold">🖨️ Imprimir corte</button>
+      <button onclick="window.print()" class="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold">📄 PDF</button>
+    </header>
+
+    <main class="max-w-4xl mx-auto p-4 md:p-6 space-y-5">
+      <!-- Encabezado -->
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 grid sm:grid-cols-2 gap-3 text-sm">
+        <div>
+          <p class="text-[10px] uppercase font-bold tracking-wider text-gray-400">Apertura</p>
+          <p class="font-bold text-gray-900">{{.Session.OpenedBy}} · {{localTime .Session.OpenedAt}}</p>
+          <p class="text-gray-500">Fondo inicial {{money .Session.OpeningFloat}}{{if .Session.OpeningNotes}} · {{.Session.OpeningNotes}}{{end}}</p>
+        </div>
+        <div>
+          <p class="text-[10px] uppercase font-bold tracking-wider text-gray-400">Cierre</p>
+          <p class="font-bold text-gray-900">{{.Session.ClosedBy}} · {{localTime .Session.ClosedAt}}</p>
+          {{- if .Session.CloseNotes }}<p class="text-gray-500">{{.Session.CloseNotes}}</p>{{ end }}
+        </div>
+      </section>
+
+      <!-- Arqueo -->
+      <section class="space-y-3">
+        <h2 class="text-base font-black text-gray-900">🧮 Arqueo</h2>
+        <div class="grid md:grid-cols-2 gap-3">
+          {{- range .Arqueo }}
+          <div class="rounded-2xl border p-4 {{.Tone}}">
+            <div class="flex justify-between items-start">
+              <p class="font-black">{{.Label}}</p>
+              <span class="text-xs font-black uppercase">{{.Verdict}}</span>
+            </div>
+            <div class="mt-3 grid grid-cols-3 gap-2 text-center">
+              <div><p class="text-[10px] uppercase font-bold opacity-70">Sistema</p><p class="font-mono font-bold">{{money .Expected}}</p></div>
+              <div><p class="text-[10px] uppercase font-bold opacity-70">Reportado</p><p class="font-mono font-bold">{{money .Reported}}</p></div>
+              <div><p class="text-[10px] uppercase font-bold opacity-70">Diferencia</p><p class="font-mono font-black text-lg">{{.DiffText}}</p></div>
+            </div>
+            {{- if .Note }}<p class="mt-2 text-xs opacity-80">{{.Note}}</p>{{ end }}
+          </div>
+          {{- end }}
+        </div>
+      </section>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <!-- Efectivo -->
+        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 text-sm">
+          <h2 class="text-base font-black text-gray-900 mb-3">💵 Efectivo esperado</h2>
+          <dl class="space-y-1.5">
+            <div class="flex justify-between"><dt class="text-gray-600">Fondo inicial</dt><dd class="font-mono">{{money .Session.OpeningFloat}}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-600">Cobros en efectivo</dt><dd class="font-mono">+{{money .CashSales}}</dd></div>
+            <div class="flex justify-between text-xs text-gray-400 pl-3"><dt>de los cuales son propinas</dt><dd class="font-mono">{{money .CashTips}}</dd></div>
+            {{- range .Movements }}
+            <div class="flex justify-between gap-3">
+              <dt class="text-gray-600 min-w-0">{{.Label}}<span class="block text-xs text-gray-400 truncate">{{.Reason}} · {{.User}}</span></dt>
+              <dd class="font-mono {{if .In}}text-emerald-700{{else}}text-rose-700{{end}}">{{if .In}}+{{else}}-{{end}}{{money .Amount}}</dd>
+            </div>
+            {{- end }}
+            <div class="flex justify-between pt-2 border-t border-gray-100 font-black"><dt>Esperado</dt><dd class="font-mono">{{money .Session.ExpectedCash}}</dd></div>
+          </dl>
+
+          {{- with .CountLines }}
+          <h3 class="text-xs font-black uppercase tracking-wider text-gray-400 mt-5 mb-2">Conteo del cajero</h3>
+          <table class="w-full text-xs">
+            {{- range . }}
+            <tr><td class="py-0.5">{{if .Coin}}Moneda{{else}}Billete{{end}} {{.Label}}</td><td class="text-right font-mono">× {{.Pieces}}</td><td class="text-right font-mono">{{money .Amount}}</td></tr>
+            {{- end }}
+            <tr class="font-black border-t border-gray-100"><td class="pt-1">Contado</td><td></td><td class="text-right font-mono pt-1">{{money $.Session.CountedCash}}</td></tr>
+          </table>
+          {{- end }}
+        </section>
+
+        <!-- Ventas -->
+        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 text-sm">
+          <h2 class="text-base font-black text-gray-900 mb-3">📈 Ventas del turno</h2>
+          <dl class="space-y-1.5">
+            <div class="flex justify-between"><dt class="text-gray-600">Cuentas cobradas</dt><dd class="font-mono">{{.Bills}}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-600">Subtotal</dt><dd class="font-mono">{{money .Subtotal}}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-600">Descuentos</dt><dd class="font-mono">-{{money .Discounts}}</dd></div>
+            <div class="flex justify-between font-bold"><dt>Ventas</dt><dd class="font-mono">{{money .Sales}}</dd></div>
+            <div class="flex justify-between text-xs text-gray-400 pl-3"><dt>IVA {{if .PricesIncludeTax}}incluido{{end}}</dt><dd class="font-mono">{{money .Tax}}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-600">Propinas</dt><dd class="font-mono">{{money .Tips}}</dd></div>
+            <div class="flex justify-between pt-2 border-t border-gray-100 font-black"><dt>Total cobrado</dt><dd class="font-mono">{{money .Collected}}</dd></div>
+            <div class="flex justify-between text-xs text-gray-500"><dt>Ticket promedio</dt><dd class="font-mono">{{money .AvgTicket}}</dd></div>
+          </dl>
+
+          <h3 class="text-xs font-black uppercase tracking-wider text-gray-400 mt-5 mb-2">Por método de pago</h3>
+          <table class="w-full text-xs">
+            <tr class="text-[10px] uppercase text-gray-400"><th class="text-left font-bold">Método</th><th class="text-right font-bold">Pagos</th><th class="text-right font-bold">Propinas</th><th class="text-right font-bold">Total</th></tr>
+            {{- range .Methods }}
+            <tr><td class="py-0.5">{{.Label}}</td><td class="text-right font-mono">{{.Count}}</td><td class="text-right font-mono">{{money .Tips}}</td><td class="text-right font-mono font-bold">{{money .Amount}}</td></tr>
+            {{- else }}
+            <tr><td colspan="4" class="text-gray-400 italic py-1">Sin cobros en este turno.</td></tr>
+            {{- end }}
+          </table>
+          {{- with .Payroll }}
+          <h3 class="text-xs font-black uppercase tracking-wider text-gray-400 mt-5 mb-1">Cargos a nómina (no entran a caja)</h3>
+          <table class="w-full text-xs">
+            {{- range . }}
+            <tr><td class="py-0.5">{{.Name}}</td><td class="text-right font-mono">{{.Count}}</td><td class="text-right font-mono font-bold">{{money .Amount}}</td></tr>
+            {{- end }}
+          </table>
+          {{- end }}
+        </section>
+      </div>
+
+      <!-- Control -->
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 text-sm space-y-4">
+        <h2 class="text-base font-black text-gray-900">🛡️ Control</h2>
+        {{- if not (or .Cancellations .Voids .Discounted .DrawerOpens) }}
+        <p class="text-xs text-gray-400 italic">Sin cancelaciones, anulaciones, descuentos ni aperturas manuales del cajón.</p>
+        {{- end }}
+
+        {{- with .Cancellations }}
+        <div>
+          <h3 class="text-xs font-black uppercase tracking-wider text-rose-600 mb-1">Órdenes cerradas sin pago</h3>
+          {{- range . }}
+          <div class="flex justify-between gap-3 py-1.5 border-b border-gray-50">
+            <div class="min-w-0"><p class="font-bold">{{.Title}}</p><p class="text-xs text-gray-600">{{.Reason}}</p>{{if .Detail}}<p class="text-[11px] text-rose-600 font-semibold">{{.Detail}}</p>{{end}}</div>
+            <div class="text-right shrink-0"><p class="font-mono font-bold">{{money .Amount}}</p><p class="text-[11px] text-gray-400">{{localTime .At}}</p></div>
+          </div>
+          {{- end }}
+        </div>
+        {{- end }}
+
+        {{- with .Voids }}
+        <div>
+          <h3 class="text-xs font-black uppercase tracking-wider text-amber-600 mb-1">Productos anulados</h3>
+          {{- range . }}
+          <div class="flex justify-between gap-3 py-1.5 border-b border-gray-50">
+            <div class="min-w-0"><p class="font-bold">{{.Title}} <span class="font-normal text-gray-400">· {{.Detail}}</span></p><p class="text-xs text-gray-600">{{.Reason}}</p></div>
+            <div class="text-right shrink-0"><p class="font-mono font-bold">{{money .Amount}}</p><p class="text-[11px] text-gray-400">{{localTime .At}}</p></div>
+          </div>
+          {{- end }}
+        </div>
+        {{- end }}
+
+        {{- with .Discounted }}
+        <div>
+          <h3 class="text-xs font-black uppercase tracking-wider text-sky-600 mb-1">Descuentos y cortesías</h3>
+          {{- range . }}
+          <div class="flex justify-between gap-3 py-1.5 border-b border-gray-50">
+            <div class="min-w-0"><p class="font-bold">{{.Title}} <span class="font-normal text-gray-400">· {{.Detail}}</span></p><p class="text-xs text-gray-600">{{if .Reason}}{{.Reason}}{{else}}<span class="italic text-gray-400">Sin motivo</span>{{end}}</p></div>
+            <p class="font-mono font-bold shrink-0">-{{money .Amount}}</p>
+          </div>
+          {{- end }}
+        </div>
+        {{- end }}
+
+        {{- with .DrawerOpens }}
+        <div>
+          <h3 class="text-xs font-black uppercase tracking-wider text-slate-600 mb-1">Aperturas manuales del cajón ({{len .}})</h3>
+          {{- range . }}
+          <div class="flex justify-between gap-3 py-1 text-xs border-b border-gray-50">
+            <span><b>{{.Title}}</b>{{if .Reason}} · {{.Reason}}{{end}}</span>
+            <span class="text-gray-400">{{localTime .At}}</span>
+          </div>
+          {{- end }}
+        </div>
+        {{- end }}
+      </section>
+
+      {{- with .TopProducts }}
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 text-sm">
+        <h2 class="text-base font-black text-gray-900 mb-3">🏆 Más vendidos</h2>
+        <table class="w-full text-xs">
+          {{- range . }}
+          <tr><td class="py-0.5">{{.Name}}</td><td class="text-right font-mono">{{.Quantity}}</td><td class="text-right font-mono font-bold">{{money .Amount}}</td></tr>
+          {{- end }}
+        </table>
+      </section>
+      {{- end }}
+
+      <!-- Notas posteriores -->
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 text-sm">
+        <h2 class="text-base font-black text-gray-900 mb-1">📝 Notas</h2>
+        <p class="text-xs text-gray-500 mb-3">El turno cerrado no se modifica; las aclaraciones se agregan como notas.</p>
+        {{- range .Notes }}
+        <div class="py-2 border-b border-gray-50">
+          <p>{{.Note}}</p>
+          <p class="text-[11px] text-gray-400">{{.User}} · {{localTime .CreatedAt}}</p>
+        </div>
+        {{- end }}
+        <form onsubmit="event.preventDefault(); addNote(this)" class="no-print mt-3 flex flex-wrap gap-2">
+          <input name="note" type="text" placeholder="Ej. El faltante de $50 fue un cambio mal dado"
+            class="flex-1 min-w-[200px] p-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          <input name="pin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="PIN"
+            class="w-24 p-2 text-sm font-mono border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          <button class="px-4 py-2 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white">Agregar nota</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

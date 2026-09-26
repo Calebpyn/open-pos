@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dispositivos · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script>
+      function devicesApp() {
+        var emptyForm = function () {
+          return {
+            id: null, name: '', connection_type: 'CUPS', system_name: '', device_uri: '',
+            ip_address: '', port: 9100, paper_width: 80, is_active: true,
+            prints_receipts: false, has_drawer: false, area_ids: []
+          };
+        };
+
+        return {
+          printers: [],
+          areas: [],
+          detected: [],
+          loading: true,
+          detecting: false,
+          detectedOnce: false,
+          notice: null, // { type: 'ok' | 'error', text }
+          busy: {},     // id de impresora -> acción en curso
+
+          form: emptyForm(),
+          formOpen: false,
+          formError: '',
+          saving: false,
+
+          confirmDelete: null,
+          removeQueue: true,
+
+          statusInfo: {
+            ready:         { label: 'Lista',            cls: 'bg-emerald-100 text-emerald-800' },
+            printing:      { label: 'Imprimiendo',      cls: 'bg-sky-100 text-sky-800' },
+            disabled:      { label: 'Pausada en CUPS',  cls: 'bg-amber-100 text-amber-800' },
+            missing_queue: { label: 'Sin cola en CUPS', cls: 'bg-rose-100 text-rose-800' },
+            offline:       { label: 'Sin conexión',     cls: 'bg-rose-100 text-rose-800' },
+            inactive:      { label: 'Inactiva',         cls: 'bg-gray-100 text-gray-600' }
+          },
+
+          // --- Terminales (iPad, teléfonos) ---
+          terminals: [],
+          loadTerminals: async function () {
+            var res = await fetch('/api/admin/terminals');
+            if (res.ok) this.terminals = await res.json();
+          },
+          saveTerminal: async function (t, changes) {
+            var body = Object.assign({ name: t.name, kind: t.kind }, changes);
+            if (!body.name.trim()) { toast('El nombre no puede quedar vacío', 'warn'); return; }
+            if (body.kind === 'FULL' && t.kind !== 'FULL' &&
+                !confirm('¿Dar acceso completo de caja a "' + t.name + '"? Podrá cobrar, abrir caja y entrar al admin (con su PIN de admin).')) return;
+            var res = await fetch('/api/admin/terminals/' + t.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            if (!res.ok) { toast((await res.text()) || 'No se pudo guardar', 'error'); return; }
+            toast('Terminal actualizada');
+            this.loadTerminals();
+          },
+          logoutTerminal: async function (t) {
+            var res = await fetch('/api/admin/terminals/' + t.id + '/logout', { method: 'POST' });
+            if (res.ok) { toast('Sesión cerrada en ' + t.name); this.loadTerminals(); }
+          },
+          ago: function (d) {
+            if (!d) return '—';
+            var m = Math.round((Date.now() - new Date(d)) / 60000);
+            return m < 1 ? 'ahora' : m < 60 ? 'hace ' + m + ' min' : m < 1440 ? 'hace ' + Math.round(m / 60) + ' h' : new Date(d).toLocaleDateString('es-MX');
+          },
+          init: function () {
+            this.loadTerminals();
+            this.load();
+            this.detect(true);
+          },
+
+          load: async function () {
+            try {
+              var res = await Promise.all([fetch('/api/printers'), fetch('/api/areas')]);
+              if (!res[0].ok || !res[1].ok) throw new Error();
+              this.printers = await res[0].json();
+              this.areas = await res[1].json();
+            } catch (e) {
+              this.flash('error', 'No se pudo cargar la información de dispositivos');
+            } finally {
+              this.loading = false;
+            }
+          },
+
+          detect: async function (quiet) {
+            this.detecting = true;
+            try {
+              var res = await fetch('/api/printers/detect');
+              if (!res.ok) throw new Error(await res.text());
+              this.detected = await res.json();
+              this.detectedOnce = true;
+            } catch (e) {
+              if (!quiet) this.flash('error', 'No se pudieron detectar dispositivos: ' + e.message);
+            } finally {
+              this.detecting = false;
+            }
+          },
+
+          flash: function (type, text) {
+            var self = this;
+            this.notice = { type: type, text: text };
+            clearTimeout(this._noticeTimer);
+            this._noticeTimer = setTimeout(function () { self.notice = null; }, 6000);
+          },
+
+          connLabel: function (p) {
+            return p.connection_type === 'NETWORK' ? 'Red · ' + p.ip_address + ':' + p.port : 'USB · cola ' + p.system_name;
+          },
+
+          // Nombre de cola sugerido a partir del nombre visible: "Cocina 1" -> "OPENPOS_COCINA_1"
+          suggestQueue: function (name) {
+            var base = (name || 'IMPRESORA').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+              .toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+            return 'OPENPOS_' + (base || 'IMPRESORA');
+          },
+
+          openNew: function (device) {
+            this.form = emptyForm();
+            // Si nadie imprime tickets de cobro, la nueva los toma por defecto.
+            this.form.prints_receipts = this.receiptPrinters.length === 0;
+            if (device) {
+              this.form.device_uri = device.uri;
+              this.form.name = '';
+              this.form.paper_width = /58/.test(device.make_and_model || device.info) ? 58 : 80;
+            }
+            this.formError = '';
+            this.formOpen = true;
+          },
+          openEdit: function (p) {
+            this.form = {
+              id: p.id, name: p.name, connection_type: p.connection_type,
+              system_name: p.connection_type === 'CUPS' ? p.system_name : '',
+              device_uri: p.device_uri, ip_address: p.ip_address, port: p.port || 9100,
+              paper_width: p.paper_width, is_active: p.is_active,
+              prints_receipts: p.prints_receipts, has_drawer: p.has_drawer, area_ids: p.area_ids.slice()
+            };
+            this.formError = '';
+            this.formOpen = true;
+          },
+
+          save: async function () {
+            var f = this.form;
+            if (f.connection_type === 'CUPS' && !f.system_name.trim()) {
+              f.system_name = this.suggestQueue(f.name);
+            }
+            this.saving = true;
+            this.formError = '';
+            try {
+              var res = await fetch(f.id ? '/api/printers/' + f.id : '/api/printers', {
+                method: f.id ? 'PUT' : 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  name: f.name, connection_type: f.connection_type, system_name: f.system_name,
+                  device_uri: f.device_uri, ip_address: f.ip_address, port: Number(f.port) || 9100,
+                  paper_width: Number(f.paper_width), is_active: f.is_active,
+                  prints_receipts: f.prints_receipts, has_drawer: f.has_drawer, area_ids: f.area_ids
+                })
+              });
+              if (!res.ok) { this.formError = await res.text(); return; }
+              this.formOpen = false;
+              this.flash('ok', f.id ? 'Impresora actualizada' : 'Impresora registrada');
+              await this.load();
+              await this.detect(true);
+            } catch (e) {
+              this.formError = 'No se pudo conectar con el servidor';
+            } finally {
+              this.saving = false;
+            }
+          },
+
+          resume: async function (p, discard) {
+            if (discard && !confirm((p.pending_jobs > 0
+                ? 'Se descartarán ' + p.pending_jobs + ' trabajo(s) en la cola de ' + p.name + '.'
+                : 'Se limpiará la cola de ' + p.name + ' y se reanudará.') +
+                ' Las comandas y tickets se pueden reimprimir desde el POS. ¿Continuar?')) return;
+            this.busy[p.id] = 'resume';
+            try {
+              var res = await fetch('/api/printers/' + p.id + '/resume' + (discard ? '?discard=1' : ''), { method: 'POST' });
+              if (!res.ok) { this.flash('error', await res.text()); return; }
+              this.flash('ok', discard ? 'Cola de ' + p.name + ' limpia y lista' : p.name + ' reanudada');
+              await this.load();
+            } catch (e) {
+              this.flash('error', 'No se pudo conectar con el servidor');
+            } finally {
+              delete this.busy[p.id];
+            }
+          },
+          testPrint: async function (p) {
+            this.busy[p.id] = 'test';
+            try {
+              var res = await fetch('/api/printers/' + p.id + '/test', { method: 'POST' });
+              if (!res.ok) { this.flash('error', await res.text()); return; }
+              var out = await res.json();
+              this.flash('ok', 'Prueba enviada a ' + p.name + (out.job_id ? ' (trabajo ' + out.job_id + ')' : ''));
+              var self = this;
+              setTimeout(function () { self.load(); }, 1500);
+            } catch (e) {
+              this.flash('error', 'No se pudo conectar con el servidor');
+            } finally {
+              delete this.busy[p.id];
+            }
+          },
+
+          askDelete: function (p) { this.confirmDelete = p; this.removeQueue = p.connection_type === 'CUPS'; },
+          doDelete: async function () {
+            var p = this.confirmDelete;
+            try {
+              var res = await fetch('/api/printers/' + p.id + (this.removeQueue ? '?remove_queue=1' : ''), { method: 'DELETE' });
+              if (!res.ok) { this.flash('error', await res.text()); return; }
+              this.flash('ok', 'Impresora eliminada');
+              this.confirmDelete = null;
+              await this.load();
+              await this.detect(true);
+            } catch (e) {
+              this.flash('error', 'No se pudo conectar con el servidor');
+            }
+          },
+
+          // Permisos de impresión en el formulario
+          hasCat: function (id) { return this.form.area_ids.indexOf(id) !== -1; },
+          toggleCat: function (id) {
+            var i = this.form.area_ids.indexOf(id);
+            if (i === -1) this.form.area_ids.push(id); else this.form.area_ids.splice(i, 1);
+          },
+
+          // Resumen: qué impresoras activas cubren cada cosa
+          printersFor: function (catId) {
+            return this.printers.filter(function (p) { return p.is_active && p.area_ids.indexOf(catId) !== -1; });
+          },
+          get receiptPrinters() {
+            return this.printers.filter(function (p) { return p.is_active && p.prints_receipts; });
+          },
+          get uncoveredCount() {
+            var self = this;
+            var n = this.areas.filter(function (c) { return self.printersFor(c.id).length === 0; }).length;
+            return n + (this.receiptPrinters.length === 0 ? 1 : 0);
+          },
+          printerName: function (id) {
+            var p = this.printers.find(function (x) { return x.id === id; });
+            return p ? p.name : '';
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased" x-data="devicesApp()">
+    {{template "admin_nav" .}}
+
+    <!-- Aviso -->
+    <div
+      x-show="notice" x-cloak x-transition
+      class="fixed top-20 right-4 z-30 max-w-sm px-4 py-3 rounded-xl shadow-lg text-sm font-semibold"
+      :class="notice && notice.type === 'error' ? 'bg-rose-600 text-white' : 'bg-emerald-600 text-white'"
+      x-text="notice && notice.text"
+    ></div>
+
+    <main class="max-w-5xl mx-auto p-4 md:p-6 space-y-6">
+      <!-- Impresoras registradas -->
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+        <div class="flex justify-between items-center mb-4 gap-3">
+          <div>
+            <h2 class="text-base font-black text-gray-900">🖨️ Impresoras</h2>
+            <p class="text-xs text-gray-500">Térmicas ESC/POS por USB (vía CUPS) o por red (puerto 9100).</p>
+          </div>
+          <div class="shrink-0 flex gap-2">
+            <a href="/api/admin/diagnostics" title="Archivo con la configuración, las colas de CUPS y los últimos trabajos, para revisar problemas de impresión"
+              class="bg-white border border-gray-200 hover:border-gray-400 text-gray-700 px-3 py-2 rounded-xl text-xs font-bold">🩺 Descargar diagnóstico</a>
+            <button @click="openNew()" class="bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-xl text-xs font-bold">+ Agregar impresora</button>
+          </div>
+        </div>
+
+        <p x-show="loading" class="text-xs text-gray-400 italic">Cargando…</p>
+        <p x-show="!loading && printers.length === 0" class="text-sm text-gray-400 text-center py-8">No hay impresoras registradas.</p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <template x-for="p in printers" :key="p.id">
+            <div class="border border-gray-200 rounded-xl p-4 flex flex-col gap-3" :class="p.is_active ? '' : 'opacity-60'">
+              <div class="flex justify-between items-start gap-2">
+                <div class="min-w-0">
+                  <h3 class="font-black text-gray-900 truncate" x-text="p.name"></h3>
+                  <p class="text-xs text-gray-500 font-mono truncate" x-text="connLabel(p)"></p>
+                </div>
+                <span
+                  class="shrink-0 text-[11px] font-bold px-2.5 py-1 rounded-full"
+                  :class="(statusInfo[p.status] || statusInfo.inactive).cls"
+                  x-text="(statusInfo[p.status] || { label: p.status }).label"
+                ></span>
+              </div>
+              <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span class="bg-gray-100 text-gray-700 px-2 py-0.5 rounded-md font-semibold" x-text="p.paper_width + ' mm'"></span>
+                <span class="text-gray-400 font-semibold ml-1">Imprime:</span>
+                <span x-show="p.prints_receipts" class="bg-emerald-50 text-emerald-800 px-2 py-0.5 rounded-md font-semibold">💳 Tickets de cobro</span>
+                <span x-show="p.has_drawer" class="bg-amber-50 text-amber-800 px-2 py-0.5 rounded-md font-semibold">💵 Cajón</span>
+                <template x-for="c in p.areas" :key="c">
+                  <span class="bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md font-semibold" x-text="'🧾 ' + c"></span>
+                </template>
+                <span x-show="!p.prints_receipts && p.areas.length === 0" class="text-amber-700 italic">nada (edítala para asignarle qué imprimir)</span>
+              </div>
+              <div
+                x-show="p.is_active && (p.status === 'disabled' || p.pending_jobs > 0)"
+                class="text-[11px] bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-2.5 space-y-2"
+              >
+                <p>
+                  <b x-text="p.status === 'disabled' ? 'CUPS pausó esta impresora.' : 'Hay trabajos esperando.'"></b>
+                  <span x-show="p.status_reason" x-text="'Motivo: ' + p.status_reason"></span>
+                  <span x-show="p.pending_jobs > 0" x-text="p.pending_jobs + ' trabajo(s) en cola.'"></span>
+                </p>
+                <p class="text-amber-800">Revisa que esté encendida, con papel y conectada. El POS la reanuda solo al imprimir, o hazlo aquí:</p>
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    x-show="p.pending_jobs > 0"
+                    @click="resume(p, true)"
+                    :disabled="!!busy[p.id]"
+                    class="px-3 py-1.5 rounded-lg font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 disabled:opacity-50"
+                  >Descartar pendientes y reanudar</button>
+                  <button
+                    @click="resume(p, false)"
+                    :disabled="!!busy[p.id]"
+                    class="px-3 py-1.5 rounded-lg font-bold bg-white border border-amber-300 hover:border-amber-500 disabled:opacity-50"
+                    x-text="p.pending_jobs > 0 ? 'Reanudar e imprimir pendientes' : 'Reanudar'"
+                  ></button>
+                </div>
+              </div>
+              <p x-show="p.status === 'missing_queue'" class="text-[11px] text-rose-700">
+                No existe la cola <span class="font-mono" x-text="p.system_name"></span> en CUPS. Edítala y elige el dispositivo USB para crearla.
+              </p>
+              <div class="flex gap-2 pt-2 border-t border-gray-100">
+                <button
+                  @click="testPrint(p)"
+                  :disabled="!!busy[p.id] || !p.is_active"
+                  class="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-200 disabled:text-gray-400 text-white py-2 rounded-lg text-xs font-bold"
+                  x-text="busy[p.id] === 'test' ? 'Enviando…' : '🖨️ Imprimir prueba'"
+                ></button>
+                <button
+                  x-show="p.connection_type === 'CUPS'"
+                  @click="resume(p, true)"
+                  :disabled="!!busy[p.id]"
+                  title="Descarta los trabajos atorados y reanuda la impresora"
+                  class="bg-slate-100 hover:bg-slate-200 disabled:opacity-50 px-3 py-2 rounded-lg text-xs font-bold"
+                  x-text="busy[p.id] === 'resume' ? 'Limpiando…' : '🧹 Limpiar cola'"
+                ></button>
+                <button @click="openEdit(p)" class="bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg text-xs font-bold">Editar</button>
+                <button @click="askDelete(p)" class="bg-rose-50 hover:bg-rose-100 text-rose-700 px-3 py-2 rounded-lg text-xs font-bold">Eliminar</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- Dispositivos USB detectados -->
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+        <div class="flex justify-between items-center mb-4 gap-3">
+          <div>
+            <h2 class="text-base font-black text-gray-900">🔌 Conectadas por USB a este equipo</h2>
+            <p class="text-xs text-gray-500">Si conectas una impresora nueva, presiona "Buscar" (tarda unos segundos).</p>
+          </div>
+          <button
+            @click="detect(false)"
+            :disabled="detecting"
+            class="shrink-0 bg-slate-100 hover:bg-slate-200 px-4 py-2 rounded-xl text-xs font-bold"
+            x-text="detecting ? 'Buscando…' : '🔄 Buscar'"
+          ></button>
+        </div>
+        <p x-show="detectedOnce && detected.length === 0" class="text-sm text-gray-400 text-center py-6">
+          No se detectó ninguna impresora USB. Revisa que esté encendida y bien conectada.
+        </p>
+        <div class="space-y-2">
+          <template x-for="d in detected" :key="d.uri">
+            <div class="flex justify-between items-center gap-3 border border-gray-200 rounded-xl px-4 py-3">
+              <div class="min-w-0">
+                <p class="text-sm font-bold text-gray-800 truncate" x-text="d.make_and_model || d.info"></p>
+                <p class="text-[11px] text-gray-400 font-mono truncate" x-text="d.uri"></p>
+              </div>
+              <span x-show="d.registered_as" class="shrink-0 text-xs font-semibold text-emerald-700">✔ <span x-text="d.registered_as"></span></span>
+              <button x-show="!d.registered_as" @click="openNew(d)" class="shrink-0 bg-slate-900 hover:bg-slate-800 text-white px-3 py-2 rounded-lg text-xs font-bold">Registrar</button>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- Terminales -->
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+        <div class="mb-4">
+          <h2 class="text-base font-black text-gray-900">📱 Terminales</h2>
+          <p class="text-xs text-gray-500">iPads y teléfonos que han abierto el POS. Por omisión son de <b>mesero</b>: toman órdenes, ven Expo e imprimen pre-cuentas, con PIN; no cobran ni entran al admin. Esta compu (la central) siempre tiene acceso completo.</p>
+        </div>
+        <p x-show="!terminals.length" class="text-sm text-gray-400 text-center py-6">Todavía no se conecta ningún iPad o teléfono.</p>
+        <div class="divide-y divide-gray-100">
+          <template x-for="t in terminals" :key="t.id">
+            <div class="py-3 flex flex-wrap items-center gap-3">
+              <input type="text" :value="t.name" @change="saveTerminal(t, { name: $event.target.value })" maxlength="30"
+                class="w-40 text-sm font-bold p-1.5 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+              <span class="text-xs text-gray-500" x-text="t.device + ' · ' + t.ip + ' · ' + ago(t.last_seen)"></span>
+              <span class="text-xs" :class="t.user ? 'text-emerald-700 font-bold' : 'text-gray-400'" x-text="t.user ? '👤 ' + t.user : 'Sin sesión'"></span>
+              <div class="ml-auto flex items-center gap-2">
+                <button x-show="t.user" @click="logoutTerminal(t)" class="text-xs text-gray-500 underline">Cerrar sesión</button>
+                <select :value="t.kind" @change="saveTerminal(t, { kind: $event.target.value }); $event.target.value = t.kind"
+                  class="text-xs p-1.5 rounded-lg border border-gray-200 bg-white">
+                  <option value="WAITER">Mesero (simplificada)</option>
+                  <option value="FULL">Caja completa</option>
+                </select>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- Resumen de impresión -->
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+        <div class="flex justify-between items-start gap-3 mb-4">
+          <div>
+            <h2 class="text-base font-black text-gray-900">🧾 Qué se imprime y dónde</h2>
+            <p class="text-xs text-gray-500">Para cambiarlo, edita la impresora y marca qué debe imprimir.</p>
+          </div>
+          <span
+            x-show="uncoveredCount > 0"
+            class="shrink-0 text-[11px] font-bold bg-amber-100 text-amber-800 px-2.5 py-1 rounded-full"
+            x-text="uncoveredCount === 1 ? '1 sin impresora' : uncoveredCount + ' sin impresora'"
+          ></span>
+        </div>
+        <div class="divide-y divide-gray-100">
+          <div class="flex justify-between items-center gap-3 py-2.5">
+            <span class="text-sm font-bold text-gray-800">💳 Tickets de cobro</span>
+            <span class="flex flex-wrap justify-end gap-1.5">
+              <template x-for="p in receiptPrinters" :key="p.id">
+                <span class="text-xs bg-slate-100 text-slate-800 px-2 py-0.5 rounded-md font-semibold" x-text="p.name"></span>
+              </template>
+              <span x-show="receiptPrinters.length === 0" class="text-xs text-amber-700 font-semibold">⚠️ Ninguna impresora</span>
+            </span>
+          </div>
+          <div class="flex justify-between items-center gap-3 py-2.5">
+            <span class="text-sm font-bold text-gray-800">💵 Cajón de dinero</span>
+            <span class="flex flex-wrap justify-end gap-1.5">
+              <template x-for="p in printers.filter(function (p) { return p.is_active && p.has_drawer; })" :key="p.id">
+                <span class="text-xs bg-slate-100 text-slate-800 px-2 py-0.5 rounded-md font-semibold" x-text="p.name"></span>
+              </template>
+              <span x-show="!printers.some(function (p) { return p.is_active && p.has_drawer; })" class="text-xs text-gray-400 font-semibold">Sin cajón conectado</span>
+            </span>
+          </div>
+          <template x-for="c in areas" :key="c.id">
+            <div class="flex justify-between items-center gap-3 py-2.5">
+              <span class="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                <span class="w-3 h-3 rounded-full" :style="'background:' + c.color_hex"></span>
+                <span x-text="'Comandas de ' + c.name"></span>
+              </span>
+              <span class="flex flex-wrap justify-end gap-1.5">
+                <template x-for="p in printersFor(c.id)" :key="p.id">
+                  <span class="text-xs bg-slate-100 text-slate-800 px-2 py-0.5 rounded-md font-semibold" x-text="p.name"></span>
+                </template>
+                <span x-show="printersFor(c.id).length === 0" class="text-xs text-amber-700 font-semibold">⚠️ No se imprimen</span>
+              </span>
+            </div>
+          </template>
+        </div>
+      </section>
+    </main>
+
+    <!-- Formulario -->
+    <div x-show="formOpen" x-cloak class="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-20" @keydown.escape.window="formOpen = false">
+      <div class="bg-white rounded-3xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto" @click.outside="formOpen = false">
+        <h2 class="text-lg font-black text-gray-900 mb-4" x-text="form.id ? 'Editar impresora' : 'Nueva impresora'"></h2>
+
+        <div class="space-y-4">
+          <div>
+            <label class="text-xs font-bold text-gray-600 block mb-1">Nombre</label>
+            <input type="text" x-model="form.name" placeholder="Ej. Barra, Cocina, Caja" class="w-full text-sm p-2.5 rounded-xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          </div>
+
+          <div>
+            <label class="text-xs font-bold text-gray-600 block mb-1">Conexión</label>
+            <div class="grid grid-cols-2 gap-2 bg-gray-100 p-1 rounded-xl">
+              <button @click="form.connection_type = 'CUPS'" :class="form.connection_type === 'CUPS' ? 'bg-white shadow font-bold' : 'text-gray-500'" class="py-2 rounded-lg text-xs">🔌 USB</button>
+              <button @click="form.connection_type = 'NETWORK'" :class="form.connection_type === 'NETWORK' ? 'bg-white shadow font-bold' : 'text-gray-500'" class="py-2 rounded-lg text-xs">🌐 Red (IP)</button>
+            </div>
+          </div>
+
+          <template x-if="form.connection_type === 'CUPS'">
+            <div class="space-y-4">
+              <div>
+                <label class="text-xs font-bold text-gray-600 block mb-1">Dispositivo USB</label>
+                <select x-model="form.device_uri" class="w-full text-sm p-2.5 rounded-xl border border-gray-300 bg-white">
+                  <option value="">— Usar una cola de CUPS existente —</option>
+                  <template x-for="d in detected" :key="d.uri">
+                    <option :value="d.uri" :selected="form.device_uri === d.uri" x-text="(d.make_and_model || d.info) + (d.registered_as && d.registered_as !== form.name ? ' (usada por ' + d.registered_as + ')' : '')"></option>
+                  </template>
+                  <template x-if="form.device_uri && !detected.some(function (d) { return d.uri === form.device_uri; })">
+                    <option :value="form.device_uri" selected x-text="(detecting ? 'Buscando… ' : 'No conectado: ') + form.device_uri"></option>
+                  </template>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">Al guardar se crea o actualiza la cola en CUPS apuntando a este dispositivo.</p>
+              </div>
+              <div>
+                <label class="text-xs font-bold text-gray-600 block mb-1">Nombre de la cola en CUPS</label>
+                <input type="text" x-model="form.system_name" :placeholder="suggestQueue(form.name)" class="w-full text-sm p-2.5 rounded-xl border border-gray-300 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400" />
+                <p class="text-[11px] text-gray-400 mt-1">Sin espacios. Si lo dejas vacío se usa el sugerido.</p>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="form.connection_type === 'NETWORK'">
+            <div class="grid grid-cols-3 gap-2">
+              <div class="col-span-2">
+                <label class="text-xs font-bold text-gray-600 block mb-1">Dirección IP</label>
+                <input type="text" inputmode="decimal" x-model="form.ip_address" placeholder="192.168.1.100" class="w-full text-sm p-2.5 rounded-xl border border-gray-300 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400" />
+              </div>
+              <div>
+                <label class="text-xs font-bold text-gray-600 block mb-1">Puerto</label>
+                <input type="number" x-model="form.port" class="w-full text-sm p-2.5 rounded-xl border border-gray-300 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400" />
+              </div>
+            </div>
+          </template>
+
+          <div>
+            <label class="text-xs font-bold text-gray-600 block mb-1">Ancho de papel</label>
+            <div class="grid grid-cols-2 gap-2 bg-gray-100 p-1 rounded-xl">
+              <button @click="form.paper_width = 58" :class="Number(form.paper_width) === 58 ? 'bg-white shadow font-bold' : 'text-gray-500'" class="py-2 rounded-lg text-xs">58 mm · 32 columnas</button>
+              <button @click="form.paper_width = 80" :class="Number(form.paper_width) === 80 ? 'bg-white shadow font-bold' : 'text-gray-500'" class="py-2 rounded-lg text-xs">80 mm · 48 columnas</button>
+            </div>
+          </div>
+
+          <div>
+            <label class="text-xs font-bold text-gray-600 block mb-2">¿Qué imprime?</label>
+            <div class="space-y-1.5">
+              <button
+                type="button"
+                @click="form.prints_receipts = !form.prints_receipts"
+                :class="form.prints_receipts ? 'border-emerald-400 bg-emerald-50' : 'border-gray-200 bg-white'"
+                class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border text-left transition"
+              >
+                <span
+                  :class="form.prints_receipts ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-gray-300 text-transparent'"
+                  class="w-5 h-5 shrink-0 rounded-md border-2 flex items-center justify-center text-xs font-black"
+                >✓</span>
+                <span class="text-sm font-semibold text-gray-800">💳 Tickets de cobro</span>
+              </button>
+              <button
+                type="button"
+                @click="form.has_drawer = !form.has_drawer"
+                :class="form.has_drawer ? 'border-amber-400 bg-amber-50' : 'border-gray-200 bg-white'"
+                class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border text-left transition"
+              >
+                <span
+                  :class="form.has_drawer ? 'bg-amber-500 border-amber-500 text-white' : 'bg-white border-gray-300 text-transparent'"
+                  class="w-5 h-5 shrink-0 rounded-md border-2 flex items-center justify-center text-xs font-black"
+                >✓</span>
+                <span>
+                  <span class="block text-sm font-semibold text-gray-800">💵 Tiene cajón de dinero conectado</span>
+                  <span class="block text-[11px] text-gray-500">Se abre con el botón "Abrir cajón" de Caja y de Cobrar. Déjalo apagado si el cajón no está conectado.</span>
+                </span>
+              </button>
+              <p class="text-[11px] font-semibold text-gray-400 pt-2">Comandas del área de producción:</p>
+              <template x-for="c in areas" :key="c.id">
+                <button
+                  type="button"
+                  @click="toggleCat(c.id)"
+                  :class="hasCat(c.id) ? 'border-emerald-400 bg-emerald-50' : 'border-gray-200 bg-white'"
+                  class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border text-left transition"
+                >
+                  <span
+                    :class="hasCat(c.id) ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-gray-300 text-transparent'"
+                    class="w-5 h-5 shrink-0 rounded-md border-2 flex items-center justify-center text-xs font-black"
+                  >✓</span>
+                  <span class="w-3 h-3 rounded-full shrink-0" :style="'background:' + c.color_hex"></span>
+                  <span class="text-sm font-semibold text-gray-800" x-text="c.name"></span>
+                  <span
+                    x-show="printersFor(c.id).filter(function (p) { return p.id !== form.id; }).length > 0"
+                    class="ml-auto text-[11px] text-gray-400"
+                    x-text="'también en ' + printersFor(c.id).filter(function (p) { return p.id !== form.id; }).map(function (p) { return p.name; }).join(', ')"
+                  ></span>
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+            <input type="checkbox" x-model="form.is_active" class="rounded" />
+            Activa
+          </label>
+
+          <p x-show="formError" class="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg p-2 font-semibold" x-text="formError"></p>
+        </div>
+
+        <div class="flex gap-2 mt-6">
+          <button @click="formOpen = false" class="flex-1 bg-gray-100 hover:bg-gray-200 py-2.5 rounded-xl text-sm font-bold">Cancelar</button>
+          <button @click="save()" :disabled="saving || !form.name.trim()" class="flex-1 bg-slate-900 hover:bg-slate-800 disabled:bg-gray-300 text-white py-2.5 rounded-xl text-sm font-bold" x-text="saving ? 'Guardando…' : 'Guardar'"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confirmar eliminación -->
+    <div x-show="confirmDelete" x-cloak class="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-20">
+      <div class="bg-white rounded-3xl shadow-xl w-full max-w-sm p-6" @click.outside="confirmDelete = null">
+        <h2 class="text-lg font-black text-gray-900">Eliminar impresora</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          <span class="font-bold" x-text="confirmDelete && confirmDelete.name"></span> se eliminará y sus áreas de producción quedarán sin impresora asignada.
+        </p>
+        <label x-show="confirmDelete && confirmDelete.connection_type === 'CUPS'" class="flex items-center gap-2 text-sm text-gray-700 mt-4 cursor-pointer">
+          <input type="checkbox" x-model="removeQueue" class="rounded" />
+          También borrar la cola <span class="font-mono text-xs" x-text="confirmDelete && confirmDelete.system_name"></span> de CUPS
+        </label>
+        <div class="flex gap-2 mt-6">
+          <button @click="confirmDelete = null" class="flex-1 bg-gray-100 hover:bg-gray-200 py-2.5 rounded-xl text-sm font-bold">Cancelar</button>
+          <button @click="doDelete()" class="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-2.5 rounded-xl text-sm font-bold">Eliminar</button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

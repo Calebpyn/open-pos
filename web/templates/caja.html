@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Caja · Open POS</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script>
+      window.__DENOMINATIONS__ = {{.Denominations}};
+      window.__MOVEMENT_KINDS__ = {{.MovementKinds}};
+
+      function cashApp(denominations, kinds) {
+        function emptyCounts() {
+          var c = {};
+          denominations.forEach(function (d) { c[d.key] = ''; });
+          return c;
+        }
+        return {
+          denominations: denominations,
+          kinds: kinds,
+          loading: true,
+          session: null,
+          movements: [],
+          bills: 0,
+          openOrders: 0,
+          history: [],
+
+          modal: null, // open | movement | close
+          busy: false,
+          error: '',
+          form: {},
+
+          get bills_() { return denominations.filter(function (d) { return !d.coin; }); },
+          get coins_() { return denominations.filter(function (d) { return d.coin; }); },
+
+          init: function () { this.load(); },
+          load: async function () {
+            try {
+              var res = await Promise.all([fetch('/api/cash/current'), fetch('/api/cash/sessions')]);
+              var cur = await res[0].json();
+              this.session = cur.session;
+              this.movements = cur.movements || [];
+              this.bills = cur.bills || 0;
+              this.openOrders = cur.open_orders || 0;
+              this.history = await res[1].json();
+            } catch (e) {
+              toast('No se pudo cargar la caja', 'error');
+            } finally {
+              this.loading = false;
+            }
+          },
+
+          fmt: function (v) {
+            var n = Number(v) || 0;
+            return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          },
+          signed: function (v) { return (Number(v) > 0.004 ? '+' : '') + this.fmt(v); },
+          time: function (iso) {
+            return iso ? new Date(iso).toLocaleString('es-MX', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+          },
+          diffClass: function (v) {
+            if (v === null || v === undefined) return 'text-gray-400';
+            if (Math.abs(v) < 0.005) return 'text-emerald-700';
+            return v < 0 ? 'text-rose-700' : 'text-amber-700';
+          },
+
+          show: function (name) {
+            this.modal = name;
+            this.error = '';
+            this.busy = false;
+            if (name === 'open') this.form = { float: '', notes: '', pin: '' };
+            if (name === 'movement') this.form = { kind: 'EXPENSE', amount: '', reason: '', pin: '' };
+            if (name === 'close') this.form = { step: 1, counts: emptyCounts(), card: '', cardTips: '', transfer: '', notes: '', pin: '', sure: false };
+          },
+
+          get countedC() {
+            var f = this.form, total = 0;
+            if (!f.counts) return 0;
+            denominations.forEach(function (d) { total += d.cents * (parseInt(f.counts[d.key], 10) || 0); });
+            return total;
+          },
+
+          post: async function (url, body) {
+            this.busy = true;
+            this.error = '';
+            try {
+              var res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+              });
+              if (!res.ok) { this.error = (await res.text()) || 'Error en el servidor'; return null; }
+              return await res.json();
+            } catch (e) {
+              this.error = 'No se pudo conectar con el servidor';
+              return null;
+            } finally {
+              this.busy = false;
+            }
+          },
+
+          submitOpen: async function () {
+            var f = this.form;
+            if (f.float === '' || Number(f.float) < 0) { this.error = 'Captura el fondo inicial'; return; }
+            if (!f.pin) { this.error = 'Captura tu PIN'; return; }
+            if (!(await this.post('/api/cash/open', { pin: f.pin, opening_float: Number(f.float), notes: f.notes }))) return;
+            this.modal = null;
+            toast('Turno abierto con fondo de ' + this.fmt(f.float));
+            this.load();
+          },
+
+          submitMovement: async function () {
+            var f = this.form;
+            if (!(Number(f.amount) > 0)) { this.error = 'Captura el monto'; return; }
+            if (!f.reason.trim()) { this.error = 'Escribe el concepto'; return; }
+            if (!f.pin) { this.error = 'Captura tu PIN'; return; }
+            if (!(await this.post('/api/cash/movements', { pin: f.pin, kind: f.kind, amount: Number(f.amount), reason: f.reason }))) return;
+            this.modal = null;
+            toast('Movimiento registrado');
+            this.load();
+          },
+
+          opening: false,
+          openDrawer: async function () {
+            if (this.opening) return;
+            this.opening = true;
+            try {
+              var res = await fetch('/api/cash/drawer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: 'caja' })
+              });
+              if (res.ok) toast('Cajón abierto');
+              else toast((await res.text()) || 'No se pudo abrir el cajón', 'error');
+            } catch (e) {
+              toast('No se pudo conectar con el servidor', 'error');
+            } finally {
+              this.opening = false;
+            }
+          },
+
+          submitClose: async function () {
+            var f = this.form;
+            if (f.card === '') { this.error = 'Captura las ventas de la terminal (0 si no hubo)'; return; }
+            if (!f.pin) { this.error = 'Captura tu PIN'; return; }
+            if (!f.sure) { this.error = 'Confirma que el conteo es definitivo'; return; }
+            var counts = {};
+            denominations.forEach(function (d) { counts[d.key] = parseInt(f.counts[d.key], 10) || 0; });
+            var out = await this.post('/api/cash/close', {
+              pin: f.pin,
+              counts: counts,
+              reported_card: Number(f.card) || 0,
+              reported_card_tips: Number(f.cardTips) || 0,
+              reported_transfer: f.transfer === '' ? null : Number(f.transfer),
+              notes: f.notes
+            });
+            if (!out) return;
+            location.href = '/caja/turnos/' + out.id + '?print=1';
+          }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+  </head>
+  <body
+    class="bg-gray-100 min-h-screen font-sans antialiased"
+    x-data="cashApp(window.__DENOMINATIONS__, window.__MOVEMENT_KINDS__)"
+    @keydown.escape.window="modal = null"
+  >
+    <header class="bg-slate-900 text-white px-4 py-3 shadow-md flex items-center gap-4 h-16 sticky top-0 z-10">
+      <a href="/" class="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition">← Volver</a>
+      <div class="flex-1">
+        <p class="text-[10px] uppercase font-mono font-bold tracking-wider text-slate-400">Turnos y arqueo</p>
+        <h1 class="text-lg font-black leading-tight">💵 Caja</h1>
+      </div>
+      <button
+        @click="openDrawer()"
+        :disabled="opening"
+        class="bg-amber-500 hover:bg-amber-400 text-slate-950 px-4 py-2 rounded-xl text-xs font-black transition disabled:opacity-50"
+      >
+        <span x-text="opening ? 'Abriendo…' : '🔓 Abrir cajón'"></span>
+      </button>
+    </header>
+
+    <main class="max-w-4xl mx-auto p-4 md:p-6 space-y-6">
+      <p x-show="loading" class="text-sm text-gray-400 italic">Cargando…</p>
+
+      <!-- Caja cerrada -->
+      <section
+        x-show="!loading && !session"
+        x-cloak
+        class="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 text-center"
+      >
+        <p class="text-4xl mb-2">🔒</p>
+        <h2 class="text-xl font-black text-gray-900">No hay turno abierto</h2>
+        <p class="text-sm text-gray-500 mt-1">Mientras la caja esté cerrada no se puede cobrar.</p>
+        <button
+          @click="show('open')"
+          class="mt-5 bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-3 rounded-xl text-sm font-black"
+        >
+          Abrir turno
+        </button>
+      </section>
+
+      <!-- Turno abierto -->
+      <template x-if="!loading && session">
+        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-5">
+          <div class="flex flex-wrap justify-between items-start gap-3">
+            <div>
+              <p class="text-[10px] uppercase font-mono font-bold tracking-wider text-emerald-600">● Turno abierto</p>
+              <h2 class="text-2xl font-black text-gray-900">Turno #<span x-text="session.id"></span></h2>
+              <p class="text-xs text-gray-500 mt-0.5">
+                Abierto por <b x-text="session.opened_by"></b> · <span x-text="time(session.opened_at)"></span>
+              </p>
+            </div>
+            <div class="grid grid-cols-3 gap-2 text-center">
+              <div class="bg-gray-50 rounded-xl px-3 py-2">
+                <p class="text-[10px] uppercase font-bold text-gray-400">Fondo</p>
+                <p class="font-mono font-black text-gray-900" x-text="fmt(session.opening_float)"></p>
+              </div>
+              <div class="bg-gray-50 rounded-xl px-3 py-2">
+                <p class="text-[10px] uppercase font-bold text-gray-400">Cuentas</p>
+                <p class="font-mono font-black text-gray-900" x-text="bills"></p>
+              </div>
+              <div class="bg-gray-50 rounded-xl px-3 py-2">
+                <p class="text-[10px] uppercase font-bold text-gray-400">Órdenes abiertas</p>
+                <p class="font-mono font-black text-gray-900" x-text="openOrders"></p>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-2">
+            <button @click="show('movement')" class="flex-1 min-w-[160px] bg-slate-900 hover:bg-slate-800 text-white py-3 rounded-xl text-sm font-bold">
+              ↕️ Registrar gasto / movimiento
+            </button>
+            <button @click="show('close')" class="flex-1 min-w-[160px] bg-rose-600 hover:bg-rose-700 text-white py-3 rounded-xl text-sm font-bold">
+              🧮 Cerrar turno (arqueo)
+            </button>
+          </div>
+
+          <div>
+            <h3 class="text-sm font-black text-gray-800 mb-2">Movimientos de efectivo</h3>
+            <p x-show="movements.length === 0" class="text-xs text-gray-400 italic">Sin movimientos en este turno.</p>
+            <ul class="divide-y divide-gray-100">
+              <template x-for="m in movements" :key="m.id">
+                <li class="py-2 flex justify-between items-start gap-3">
+                  <div class="min-w-0">
+                    <p class="text-sm font-bold text-gray-800" x-text="m.label"></p>
+                    <p class="text-xs text-gray-500" x-text="m.reason"></p>
+                    <p class="text-[11px] text-gray-400"><span x-text="m.user"></span> · <span x-text="time(m.created_at)"></span></p>
+                  </div>
+                  <span class="font-mono font-bold text-sm" :class="m.in ? 'text-emerald-700' : 'text-rose-700'" x-text="(m.in ? '+' : '-') + fmt(m.amount)"></span>
+                </li>
+              </template>
+            </ul>
+          </div>
+          <p class="text-[11px] text-gray-400">
+            Los montos de venta del turno no se muestran aquí: el arqueo es ciego y se revelan al cerrar.
+          </p>
+        </section>
+      </template>
+
+      <!-- Historial -->
+      <section x-show="!loading" x-cloak class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+        <h2 class="text-base font-black text-gray-900 mb-3">Cortes anteriores</h2>
+        <p x-show="history.filter(h => h.status === 'CLOSED').length === 0" class="text-xs text-gray-400 italic">Aún no hay turnos cerrados.</p>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" x-show="history.filter(h => h.status === 'CLOSED').length > 0">
+            <thead>
+              <tr class="text-[10px] uppercase tracking-wider text-gray-400 text-left">
+                <th class="py-2 pr-3">Turno</th>
+                <th class="py-2 pr-3">Cierre</th>
+                <th class="py-2 pr-3">Cerró</th>
+                <th class="py-2 pr-3 text-right">Cuentas</th>
+                <th class="py-2 pr-3 text-right">Dif. efectivo</th>
+                <th class="py-2 pr-3 text-right">Dif. terminal</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <template x-for="h in history.filter(h => h.status === 'CLOSED')" :key="h.id">
+                <tr>
+                  <td class="py-2 pr-3 font-bold">#<span x-text="h.id"></span></td>
+                  <td class="py-2 pr-3 text-gray-600" x-text="time(h.closed_at)"></td>
+                  <td class="py-2 pr-3 text-gray-600" x-text="h.closed_by"></td>
+                  <td class="py-2 pr-3 text-right font-mono" x-text="h.bills"></td>
+                  <td class="py-2 pr-3 text-right font-mono font-bold" :class="diffClass(h.cash_diff)" x-text="signed(h.cash_diff)"></td>
+                  <td class="py-2 pr-3 text-right font-mono font-bold" :class="diffClass(h.card_diff)" x-text="signed(h.card_diff)"></td>
+                  <td class="py-2 text-right"><a :href="'/caja/turnos/' + h.id" class="text-xs font-bold text-slate-700 hover:underline">Ver corte →</a></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <!-- Modales -->
+    <div
+      x-show="modal"
+      x-cloak
+      @click.self="modal = null"
+      class="fixed inset-0 z-40 bg-slate-900/60 flex items-center justify-center p-4"
+    >
+      <div class="bg-white rounded-2xl w-full shadow-2xl max-h-[92vh] overflow-y-auto" :class="modal === 'close' ? 'max-w-2xl' : 'max-w-md'">
+        <!-- Abrir turno -->
+        <form x-show="modal === 'open'" @submit.prevent="submitOpen()" class="p-6 space-y-4">
+          <h2 class="text-lg font-black text-gray-900">Abrir turno</h2>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Fondo inicial (efectivo para cambio)</span>
+            <input type="number" min="0" step="0.5" x-model="form.float" placeholder="0.00"
+              class="mt-1 w-full p-3 text-lg font-mono border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+          </label>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Notas (opcional)</span>
+            <input type="text" x-model="form.notes" placeholder="Ej. Turno de la mañana"
+              class="mt-1 w-full p-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+          </label>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">PIN</span>
+            <input type="password" inputmode="numeric" maxlength="6" autocomplete="off" x-model="form.pin"
+              class="mt-1 w-full p-3 text-lg font-mono tracking-widest border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+          </label>
+          <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600"></p>
+          <div class="flex gap-2">
+            <button type="button" @click="modal = null" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+            <button type="submit" :disabled="busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">Abrir turno</button>
+          </div>
+        </form>
+
+        <!-- Movimiento -->
+        <form x-show="modal === 'movement'" @submit.prevent="submitMovement()" class="p-6 space-y-4">
+          <h2 class="text-lg font-black text-gray-900">Registrar movimiento de efectivo</h2>
+          <div class="grid grid-cols-2 gap-1.5">
+            <template x-for="k in kinds" :key="k.key">
+              <button type="button" @click="form.kind = k.key"
+                :class="form.kind === k.key ? (k.in ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-slate-900 border-slate-900 text-white') : 'bg-white border-gray-200 text-gray-700 hover:border-gray-400'"
+                class="text-left text-xs font-semibold px-3 py-2 rounded-xl border transition">
+                <span x-text="(k.in ? '＋ ' : '－ ') + k.label"></span>
+              </button>
+            </template>
+          </div>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Monto</span>
+            <input type="number" min="0" step="0.5" x-model="form.amount" placeholder="0.00"
+              class="mt-1 w-full p-3 text-lg font-mono border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          </label>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">Concepto</span>
+            <input type="text" x-model="form.reason" placeholder="Ej. Garrafones de agua, hielo, proveedor de leche…"
+              class="mt-1 w-full p-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          </label>
+          <label class="block">
+            <span class="text-xs font-bold text-gray-700">PIN</span>
+            <input type="password" inputmode="numeric" maxlength="6" autocomplete="off" x-model="form.pin"
+              class="mt-1 w-full p-3 text-lg font-mono tracking-widest border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          </label>
+          <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600"></p>
+          <div class="flex gap-2">
+            <button type="button" @click="modal = null" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">Cancelar</button>
+            <button type="submit" :disabled="busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">Registrar</button>
+          </div>
+        </form>
+
+        <!-- Cerrar turno: arqueo ciego (x-if: solo existe mientras está abierto) -->
+        <template x-if="modal === 'close'">
+        <div class="p-6 space-y-4">
+          <div class="flex justify-between items-start gap-3">
+            <div>
+              <h2 class="text-lg font-black text-gray-900">Cerrar turno · Arqueo</h2>
+              <p class="text-xs text-gray-500">
+                Paso <span x-text="form.step"></span> de 2 ·
+                <span x-text="form.step === 1 ? 'Cuenta el efectivo del cajón' : 'Terminal y confirmación'"></span>
+              </p>
+            </div>
+            <button @click="modal = null" class="text-gray-400 hover:text-gray-700 text-xl leading-none">×</button>
+          </div>
+
+          <p x-show="openOrders > 0" class="text-xs bg-amber-50 border border-amber-200 text-amber-900 rounded-lg px-3 py-2">
+            ⚠️ Hay <b x-text="openOrders"></b> orden(es) abierta(s). Pueden cobrarse en el siguiente turno.
+          </p>
+
+          <!-- Paso 1: conteo -->
+          <div x-show="form.step === 1" class="space-y-4">
+            <p class="text-xs text-gray-500">
+              Captura cuántas piezas hay de cada denominación, <b>incluyendo el fondo y las propinas</b> en efectivo.
+            </p>
+            <div class="grid md:grid-cols-2 gap-4">
+              <div>
+                <p class="text-[10px] uppercase font-bold tracking-wider text-gray-400 mb-1.5">Billetes</p>
+                <template x-for="d in bills_" :key="d.key">
+                  <label class="flex items-center gap-2 py-1">
+                    <span class="w-16 text-sm font-bold text-gray-700" x-text="d.label"></span>
+                    <span class="text-gray-400 text-xs">×</span>
+                    <input type="number" min="0" step="1" inputmode="numeric" x-model="form.counts[d.key]" placeholder="0"
+                      class="w-20 p-1.5 text-right font-mono border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-rose-300" />
+                    <span class="flex-1 text-right font-mono text-sm text-gray-600" x-text="fmt(d.cents * (parseInt(form.counts[d.key], 10) || 0) / 100)"></span>
+                  </label>
+                </template>
+              </div>
+              <div>
+                <p class="text-[10px] uppercase font-bold tracking-wider text-gray-400 mb-1.5">Monedas</p>
+                <template x-for="d in coins_" :key="d.key">
+                  <label class="flex items-center gap-2 py-1">
+                    <span class="w-16 text-sm font-bold text-gray-700" x-text="d.label"></span>
+                    <span class="text-gray-400 text-xs">×</span>
+                    <input type="number" min="0" step="1" inputmode="numeric" x-model="form.counts[d.key]" placeholder="0"
+                      class="w-20 p-1.5 text-right font-mono border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-rose-300" />
+                    <span class="flex-1 text-right font-mono text-sm text-gray-600" x-text="fmt(d.cents * (parseInt(form.counts[d.key], 10) || 0) / 100)"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+            <div class="flex justify-between items-center bg-slate-900 text-white rounded-xl px-4 py-3">
+              <span class="text-xs font-bold uppercase tracking-wider">Efectivo contado</span>
+              <span class="text-2xl font-mono font-black" x-text="fmt(countedC / 100)"></span>
+            </div>
+            <button @click="form.step = 2" class="w-full py-3 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white">
+              Siguiente →
+            </button>
+          </div>
+
+          <!-- Paso 2: terminal y confirmación -->
+          <form x-show="form.step === 2" @submit.prevent="submitClose()" class="space-y-4">
+            <div class="bg-sky-50 border border-sky-200 rounded-xl p-4 space-y-3">
+              <p class="text-sm font-black text-sky-900">Terminal Mercado Pago</p>
+              <p class="text-xs text-sky-800">Copia los totales del resumen de ventas del turno en la terminal.</p>
+              <div class="grid grid-cols-2 gap-3">
+                <label class="block">
+                  <span class="text-xs font-bold text-gray-700">Ventas (sin propina)</span>
+                  <input type="number" min="0" step="0.01" x-model="form.card" placeholder="0.00"
+                    class="mt-1 w-full p-2 font-mono border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400" />
+                </label>
+                <label class="block">
+                  <span class="text-xs font-bold text-gray-700">Propinas</span>
+                  <input type="number" min="0" step="0.01" x-model="form.cardTips" placeholder="0.00"
+                    class="mt-1 w-full p-2 font-mono border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400" />
+                </label>
+              </div>
+            </div>
+            <label class="block">
+              <span class="text-xs font-bold text-gray-700">Transferencias recibidas (opcional)</span>
+              <input type="number" min="0" step="0.01" x-model="form.transfer" placeholder="Déjalo vacío si no las revisaste"
+                class="mt-1 w-full p-2 font-mono border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400" />
+            </label>
+            <label class="block">
+              <span class="text-xs font-bold text-gray-700">Notas del cierre (opcional)</span>
+              <textarea x-model="form.notes" rows="2"
+                class="mt-1 w-full p-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400"></textarea>
+            </label>
+            <div class="flex justify-between text-sm bg-gray-50 rounded-xl px-4 py-2">
+              <span class="text-gray-600">Efectivo contado</span>
+              <span class="font-mono font-black" x-text="fmt(countedC / 100)"></span>
+            </div>
+            <label class="block">
+              <span class="text-xs font-bold text-gray-700">PIN</span>
+              <input type="password" inputmode="numeric" maxlength="6" autocomplete="off" x-model="form.pin"
+                class="mt-1 w-full p-3 text-lg font-mono tracking-widest border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-rose-300" />
+            </label>
+            <label class="flex items-start gap-2 text-xs text-gray-700">
+              <input type="checkbox" x-model="form.sure" class="mt-0.5" />
+              <span>El conteo es definitivo. Al cerrar se revela la diferencia y ya no se puede modificar.</span>
+            </label>
+            <p x-show="error" x-text="error" class="text-xs font-semibold text-rose-600"></p>
+            <div class="flex gap-2">
+              <button type="button" @click="form.step = 1; error = ''" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200">← Conteo</button>
+              <button type="submit" :disabled="busy" class="flex-1 py-2.5 rounded-xl text-sm font-bold bg-rose-600 hover:bg-rose-700 text-white disabled:opacity-50"
+                x-text="busy ? 'Cerrando…' : 'Cerrar turno'"></button>
+            </div>
+          </form>
+        </div>
+        </template>
+      </div>
+    </div>
+  </body>
+</html>
