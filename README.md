@@ -71,7 +71,8 @@ así sabemos qué hace falta primero.
 
 ## Instalación (para el negocio)
 
-1. Descarga el archivo `.dmg` de la [última versión](https://github.com/Calebpyn/open-pos/releases/latest).
+1. Descarga el archivo `.dmg` de la versión más reciente en [Versiones](https://github.com/Calebpyn/open-pos/releases)
+   (sección *Assets*).
 2. Ábrelo, haz doble clic en **Open POS** y elige **Instalar**.
 3. Si macOS dice que no puede verificar al desarrollador: **Configuración del
    Sistema → Privacidad y seguridad → "Abrir de todos modos"**. (La app
