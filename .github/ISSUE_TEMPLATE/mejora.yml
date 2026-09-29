@@ -1,0 +1,26 @@
+name: Proponer una mejora
+description: Una idea o algo que le haría falta a tu negocio.
+labels: ["mejora"]
+body:
+  - type: textarea
+    id: problema
+    attributes:
+      label: ¿Qué problema tienes hoy?
+      description: Cuéntalo desde el día a día del negocio, no desde la solución.
+      placeholder: Los viernes se nos juntan las órdenes para llevar y no sabemos cuál sale primero…
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: ¿Cómo te imaginas que se resuelva?
+  - type: input
+    id: negocio
+    attributes:
+      label: Tipo de negocio
+      placeholder: Cafetería con 6 mesas, 2 personas en turno
+  - type: textarea
+    id: extra
+    attributes:
+      label: Algo más
+      description: Cómo lo resuelves hoy, capturas de otro sistema, etcétera.

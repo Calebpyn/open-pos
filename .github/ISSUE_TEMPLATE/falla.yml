@@ -1,0 +1,68 @@
+name: Reportar una falla
+description: Algo no funciona como debería.
+labels: ["falla"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por avisar. Si es un problema de **seguridad** (por ejemplo, que un iPad
+        de mesero pueda cobrar o entrar al admin), **no lo publiques aquí**: repórtalo en
+        privado desde la pestaña Security. Ver SECURITY.md.
+  - type: textarea
+    id: que-paso
+    attributes:
+      label: ¿Qué pasó?
+      description: Describe la falla. Si hubo un mensaje de error, cópialo tal cual.
+    validations:
+      required: true
+  - type: textarea
+    id: pasos
+    attributes:
+      label: Pasos para que vuelva a pasar
+      placeholder: |
+        1. Abrir la mesa 3
+        2. Agregar un latte con leche de almendra
+        3. Presionar "Registrar comanda"
+    validations:
+      required: true
+  - type: textarea
+    id: esperado
+    attributes:
+      label: ¿Qué esperabas que pasara?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Versión de Open POS
+      description: En la app de Mac, menú Open POS → Acerca de Open POS.
+      placeholder: 0.7.2-beta
+    validations:
+      required: true
+  - type: dropdown
+    id: donde
+    attributes:
+      label: ¿Dónde pasó?
+      multiple: true
+      options:
+        - Compu central (donde corre Open POS)
+        - iPad / tableta
+        - Teléfono
+        - Panel de administración a distancia (Tailscale)
+  - type: input
+    id: equipo
+    attributes:
+      label: Computadora y sistema
+      placeholder: MacBook Air M1, macOS 14.5
+  - type: input
+    id: impresora
+    attributes:
+      label: Impresora (si la falla tiene que ver con imprimir)
+      placeholder: Térmica genérica 58 mm por USB (H58)
+  - type: textarea
+    id: extra
+    attributes:
+      label: Algo más
+      description: |
+        Capturas de pantalla o el registro del servidor (menú Ayuda → Ver registro del servidor).
+        Revisa que no incluyan datos de tus clientes.
