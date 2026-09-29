@@ -33,6 +33,23 @@ PRIMEROS PASOS
 - Configura menú, mesas y plano del salón, impresoras (Dispositivos) y datos
   del negocio.
 
+ADMINISTRACIÓN A DISTANCIA (Tailscale)
+Para ver reportes, historial y demás desde tu celular o tu casa, sin abrir
+puertos del router:
+1. Instala Tailscale en esta Mac (App Store o tailscale.com/download) e
+   inicia sesión. Déjalo abriéndose al iniciar sesión.
+2. Instálalo en tu celular o laptop con la MISMA cuenta.
+3. En Administración > Configuración > "Acceso remoto" aparece la dirección
+   (algo como http://nombre-de-la-mac.tu-red.ts.net:8080/admin). Ábrela en
+   el celular con Tailscale encendido y entra con tu PIN de admin.
+- Desde fuera solo se abre el panel de administración: no se puede cobrar,
+  tomar órdenes ni abrir la caja.
+- La Mac debe estar encendida con Open POS abierto. Para que no se duerma
+  con la pantalla apagada: Configuración del Sistema > Energía (o Batería >
+  Opciones) > "Evitar que la Mac entre en reposo automáticamente".
+- Quien tenga tu cuenta de Tailscale puede llegar al panel (con PIN): no la
+  compartas, y usa un PIN de admin que no sea 0001.
+
 DATOS Y RESPALDOS
 - Menú Ayuda > "Abrir carpeta de datos y respaldos".
   Base de datos: ~/Library/Application Support/Open POS/pos.db

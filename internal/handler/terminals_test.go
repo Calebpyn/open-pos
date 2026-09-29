@@ -145,3 +145,31 @@ func TestTailscaleRemoteAdmin(t *testing.T) {
 		t.Fatal("por Tailscale no se toman órdenes")
 	}
 }
+
+func TestAdminRemoteStatus(t *testing.T) {
+	_, h := setupCashDB(t)
+	t.Setenv("PORT", "9090")
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/admin/remote", h.AdminRemoteStatus)
+	srv := h.TerminalGuard(mux)
+	get := func(remote string) remoteStatus {
+		req := httptest.NewRequest("GET", "/api/admin/remote", nil)
+		req.RemoteAddr = remote
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("estado remoto: %d %s", rec.Code, rec.Body)
+		}
+		var st remoteStatus
+		if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	if st := get("100.101.102.103:4000"); !st.ViaRemote || st.Port != "9090" {
+		t.Fatalf("por Tailscale: %+v", st)
+	}
+	if st := get("127.0.0.1:4000"); st.ViaRemote || st.URLs == nil {
+		t.Fatalf("en la compu central: %+v", st)
+	}
+}

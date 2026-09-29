@@ -1,7 +1,11 @@
 {{define "admin_nav"}}
 <header class="bg-slate-900 text-white shadow-md sticky top-0 z-20">
   <div class="px-4 h-14 flex items-center gap-3">
+    {{- if .Remote }}
+    <span class="bg-sky-500/20 text-sky-200 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap" title="Conectado por Tailscale: solo el panel de administración">🌐 Remoto</span>
+    {{- else }}
     <a href="/" class="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap">← POS</a>
+    {{- end }}
     <h1 class="text-base font-black whitespace-nowrap">⚙️ Administración</h1>
     <nav class="flex-1 flex gap-1 overflow-x-auto">
       {{- range $s := adminSections }}

@@ -80,7 +80,11 @@
         </button>
       </div>
 
+      {{- if .Remote }}
+      <p class="mt-5 text-xs text-sky-600 font-semibold">🌐 Acceso remoto por Tailscale</p>
+      {{- else }}
       <a href="/" class="block mt-5 text-xs text-gray-400 hover:text-gray-700">← Volver al POS</a>
+      {{- end }}
     </div>
   </body>
 </html>

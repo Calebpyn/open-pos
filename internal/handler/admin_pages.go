@@ -40,6 +40,7 @@ func (h *UIHandler) ServeAdminPage(w http.ResponseWriter, r *http.Request) {
 			"Section":    s.Key,
 			"User":       u,
 			"DefaultPIN": defaultPINActive(r.Context(), h.POS.DB),
+			"Remote":     terminalFrom(r.Context()).Kind == TerminalRemote,
 		}, s.File, "admin/_nav.html")
 		return
 	}
@@ -57,7 +58,7 @@ func (h *UIHandler) ServeAdminLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, safeNext(r.URL.Query().Get("next")), http.StatusSeeOther)
 		return
 	}
-	renderPage(w, nil, "admin/login.html")
+	renderPage(w, map[string]any{"Remote": terminalFrom(r.Context()).Kind == TerminalRemote}, "admin/login.html")
 }
 
 // safeNext evita redirigir fuera del panel después del inicio de sesión.

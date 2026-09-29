@@ -135,6 +135,7 @@ func main() {
 	mux.HandleFunc("POST /api/admin/terminals/{id}/logout", admin(posHandler.AdminLogoutTerminal))
 	mux.HandleFunc("GET /api/admin/backups", admin(posHandler.AdminListBackups))
 	mux.HandleFunc("POST /api/admin/backups", admin(posHandler.AdminCreateBackup))
+	mux.HandleFunc("GET /api/admin/remote", admin(posHandler.AdminRemoteStatus))
 	mux.HandleFunc("GET /api/admin/backups/{name}", admin(posHandler.AdminDownloadBackup))
 	mux.HandleFunc("GET /api/admin/settings", admin(posHandler.AdminGetSettings))
 	mux.HandleFunc("PUT /api/admin/settings", admin(posHandler.AdminUpdateSettings))

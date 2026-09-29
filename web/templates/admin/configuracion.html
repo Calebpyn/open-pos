@@ -16,8 +16,10 @@
           busy: false,
           backups: null,
           backingUp: false,
+          remote: null,
           init: async function () {
             this.loadBackups();
+            this.loadRemote();
             var res = await fetch('/api/admin/settings');
             if (!res.ok) return;
             this.form = await res.json();
@@ -26,6 +28,15 @@
           loadBackups: async function () {
             var res = await fetch('/api/admin/backups');
             if (res.ok) this.backups = await res.json();
+          },
+          loadRemote: async function () {
+            var res = await fetch('/api/admin/remote');
+            if (res.ok) this.remote = await res.json();
+          },
+          copyURL: function (u) {
+            if (!navigator.clipboard) { toast('Cópiala a mano: ' + u); return; }
+            navigator.clipboard.writeText(u).then(function () { toast('Dirección copiada'); },
+              function () { toast('No se pudo copiar; cópiala a mano', 'error'); });
           },
           backupNow: async function () {
             if (this.backingUp) return;
@@ -140,6 +151,52 @@
                 </li>
               </template>
             </ul>
+          </div>
+        </template>
+      </section>
+      <section class="mt-6 bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+        <div class="flex items-center justify-between gap-3">
+          <h2 class="text-lg font-black text-gray-900">🌐 Acceso remoto</h2>
+          <button type="button" @click="loadRemote()" class="text-xs font-bold text-slate-600 underline">Revisar</button>
+        </div>
+        <p class="mt-1 text-xs text-gray-500">
+          Con <b>Tailscale</b> entras al panel de administración desde tu celular o tu casa, sin abrir puertos del router.
+          Desde fuera solo se abre el panel (con PIN de admin): no se puede cobrar ni tomar órdenes.
+        </p>
+        <template x-if="remote">
+          <div class="mt-3 text-sm">
+            <template x-if="remote.via_remote">
+              <p class="mb-3 px-3 py-2 rounded-lg bg-sky-50 text-sky-800 text-xs font-semibold">Estás conectado de forma remota ahora mismo.</p>
+            </template>
+            <template x-if="remote.connected && remote.urls.length">
+              <div>
+                <p class="font-semibold text-emerald-700">✅ Tailscale conectado</p>
+                <p class="mt-2 text-xs text-gray-500">Abre esta dirección en un dispositivo con Tailscale y tu misma cuenta:</p>
+                <ul class="mt-2 space-y-2">
+                  <template x-for="u in remote.urls" :key="u">
+                    <li class="flex items-center gap-2">
+                      <span class="flex-1 min-w-0 font-mono text-xs bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 break-all" x-text="u"></span>
+                      <button type="button" @click="copyURL(u)" class="shrink-0 px-3 py-2 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white">Copiar</button>
+                    </li>
+                  </template>
+                </ul>
+                <p class="mt-2 text-[11px] text-gray-400">La compu debe estar encendida, con Open POS abierto. No se duerme mientras la app está abierta.</p>
+              </div>
+            </template>
+            <template x-if="remote.installed && !remote.connected">
+              <p class="font-semibold text-amber-700">⚠️ Tailscale está instalado pero no conectado<span x-show="remote.state" x-text="' (' + remote.state + ')'"></span>. Ábrelo en la barra de menú e inicia sesión.</p>
+            </template>
+            <template x-if="!remote.installed">
+              <div class="text-xs text-gray-600">
+                <p class="font-semibold text-gray-800 text-sm">Tailscale no está instalado en esta compu.</p>
+                <ol class="mt-2 list-decimal pl-5 space-y-1">
+                  <li>Instala Tailscale en esta Mac (App Store o tailscale.com/download) e inicia sesión.</li>
+                  <li>Instálalo en tu celular o laptop con la <b>misma cuenta</b>.</li>
+                  <li>En esta Mac, desactiva el reposo en Ajustes → Batería / Energía, para que siga en línea.</li>
+                  <li>Vuelve aquí y toca <b>Revisar</b>: aparecerá la dirección para entrar.</li>
+                </ol>
+              </div>
+            </template>
           </div>
         </template>
       </section>
