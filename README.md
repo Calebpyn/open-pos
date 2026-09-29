@@ -14,6 +14,28 @@ terminales (iPad, teléfonos) que se conectan por el Wi-Fi del negocio.
 
 *[English summary below](#english-summary).*
 
+## Así se ve
+
+![Toma de orden: plano del salón, menú por categorías y la comanda de la mesa con cuentas por persona](docs/capturas/pos.png)
+
+| Cobro | Monitor Expo |
+|---|---|
+| ![Cobro con cuentas por persona, descuentos, propina y pagos mixtos](docs/capturas/cobro.png) | ![Monitor Expo con tiempos por platillo](docs/capturas/expo.png) |
+
+<img src="docs/capturas/ticket.png" alt="Ticket de venta con propina y pago con tarjeta" width="320" align="right">
+
+**Cobro:** por productos o por persona, descuentos, propina y pagos mixtos
+(efectivo, tarjeta, transferencia).
+
+**Monitor Expo:** qué falta por entregar en cada mesa y cuánto tiempo lleva
+cada platillo.
+
+**Ticket:** se imprime en térmicas de 58 u 80 mm.
+
+*Las capturas usan datos de ejemplo.*
+
+<br clear="right">
+
 ## ¿Para quién es?
 
 Para negocios pequeños de México que van empezando y no quieren (o no pueden)
