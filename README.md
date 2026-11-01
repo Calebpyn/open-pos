@@ -210,6 +210,19 @@ caja y el cobro se redirigen al panel o se rechazan.
 
 No hace falta abrir puertos ni exponer el servidor a internet.
 
+## Plugins
+
+Open POS se puede extender con **plugins**: programas aparte (por ejemplo, un
+inventario) que se instalan copiando una carpeta en `plugins/`, junto a la
+base de datos. Cada plugin corre en su propio proceso y guarda sus datos
+aparte, así que si falla la venta sigue. Se entera de las ventas por una
+bitácora de eventos, puede tener su sección en el panel de administración y
+se respalda junto con la base.
+
+La guía y el contrato están en [docs/plugins.md](docs/plugins.md). Hay un
+SDK para Go en [sdk/](sdk) (licencia MIT) y un plugin de ejemplo en
+[examples/plugins/hola](examples/plugins/hola).
+
 ## Datos y respaldos
 
 - Todo el dinero se calcula en centavos (enteros) para evitar errores de redondeo.

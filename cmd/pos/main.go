@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/calebpyn/open-pos/internal/database"
 	"github.com/calebpyn/open-pos/internal/handler"
+	"github.com/calebpyn/open-pos/internal/plugins"
 	"github.com/calebpyn/open-pos/web"
 )
 
@@ -44,6 +46,36 @@ func main() {
 	}
 	defer db.Close()
 
+	port := ":8080"
+	if p := os.Getenv("PORT"); p != "" {
+		port = ":" + p
+	}
+
+	// Plugins: cada uno en su carpeta dentro de plugins/ junto a la base
+	// (POS_PLUGINS_DIR para otra). POS_PLUGIN_DEV=/ruta/al/plugin conecta uno
+	// en desarrollo sin instalarlo.
+	dataDir := filepath.Dir(dbPath)
+	pluginsDir := os.Getenv("POS_PLUGINS_DIR")
+	if pluginsDir == "" {
+		pluginsDir = filepath.Join(dataDir, "plugins")
+	}
+	pluginMgr := plugins.New(plugins.Config{
+		Dir:        pluginsDir,
+		DataRoot:   filepath.Join(dataDir, "plugins-datos"),
+		DevDirs:    filepath.SplitList(os.Getenv("POS_PLUGIN_DEV")),
+		APIURL:     "http://127.0.0.1" + port,
+		POSVersion: version,
+		DB:         db,
+	})
+	// Al salir se apagan los plugins antes de cerrar la base.
+	defer func() {
+		cancel()
+		pluginMgr.Wait()
+	}()
+	database.AfterBackup = func(ctx context.Context, dir, stamp string, keep int) {
+		pluginMgr.Backup(ctx, dir, stamp, keep)
+	}
+
 	// Respaldo diario automático junto a la base (POS_BACKUP_DIR para otra carpeta).
 	backupDir := database.BackupDirFor(dbPath)
 	go database.ScheduleBackups(ctx, db, backupDir, handler.BackupKeep)
@@ -60,6 +92,10 @@ func main() {
 	// 2. Instanciar Handlers
 	posHandler := handler.NewPOSHandler(db)
 	posHandler.BackupDir = backupDir
+	posHandler.Plugins = pluginMgr
+	if err := pluginMgr.Start(ctx); err != nil {
+		log.Printf("Los plugins no se cargaron: %v", err)
+	}
 	uiHandler := handler.NewUIHandler(posHandler)
 
 	// 3. Registrar Rutas HTTP
@@ -188,14 +224,13 @@ func main() {
 	mux.HandleFunc("GET /api/menu/modifiers", posHandler.GetMenuModifiers)
 	mux.HandleFunc("POST /api/bills/{id}/print", posHandler.PrintBill)
 
+	// Plugins: su API, su administración y sus páginas en el panel
+	posHandler.RegisterPluginRoutes(mux)
+
 	// Archivos estáticos (van dentro del ejecutable)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(web.Static())))
 
 	// 4. Iniciar Servidor
-	port := ":8080"
-	if p := os.Getenv("PORT"); p != "" {
-		port = ":" + p
-	}
 	srv := &http.Server{
 		Addr:              port,
 		Handler:           handler.TrackTerminals(posHandler.TerminalGuard(mux)),

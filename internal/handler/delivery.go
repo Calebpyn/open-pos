@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+
+	"github.com/calebpyn/open-pos/internal/plugins"
 )
 
 // POST /api/order-items/{id}/deliver - Expo marca una pieza más como
@@ -67,9 +69,23 @@ func (h *POSHandler) setItemDelivered(w http.ResponseWriter, r *http.Request, de
 	if delivered {
 		args = []any{terminalUser(ctx), itemID}
 	}
-	if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+	res, err := tx.ExecContext(ctx, q, args...)
+	if err != nil {
 		serverError(w, "Error actualizando la entrega", err)
 		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		delta := 1
+		if !delivered {
+			delta = -1
+		}
+		if err := plugins.Emit(ctx, tx, "items.delivered", map[string]any{
+			"order_id": orderID, "items": []map[string]any{{"item_id": itemID, "delta": delta}},
+			"user_id": terminalUser(ctx),
+		}); err != nil {
+			serverError(w, "Error registrando evento", err)
+			return
+		}
 	}
 	if err := syncOrderDelivered(ctx, tx, orderID); err != nil {
 		serverError(w, "Error actualizando la orden", err)

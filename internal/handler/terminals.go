@@ -154,7 +154,9 @@ func (h *POSHandler) TerminalGuard(next http.Handler) http.Handler {
 		if isTailscale(r) {
 			ctx := context.WithValue(r.Context(), ctxTerminal, Terminal{Kind: TerminalRemote, Name: "Admin remoto"})
 			switch {
-			case matches(remoteAllowed, r) || (r.Method != http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/admin/")):
+			// Las páginas del panel (plugins) piden sesión de admin.
+			case matches(remoteAllowed, r) || (r.Method != http.MethodGet &&
+				(strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, "/admin/"))):
 				next.ServeHTTP(w, r.WithContext(ctx))
 			case r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/"):
 				http.Redirect(w, r, "/admin", http.StatusSeeOther)

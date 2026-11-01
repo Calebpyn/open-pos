@@ -161,6 +161,7 @@ func (h *POSHandler) AddToOrder(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Insertar los ítems con el precio vigente del catálogo. El precio de
 	// la línea incluye los extras de sus modificadores.
+	var itemIDs []int64
 	for _, item := range req.Items {
 		var basePrice float64
 		err := tx.QueryRowContext(r.Context(), `
@@ -206,6 +207,7 @@ func (h *POSHandler) AddToOrder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		itemID, _ := res.LastInsertId()
+		itemIDs = append(itemIDs, itemID)
 		for _, m := range mods {
 			if _, err := tx.ExecContext(r.Context(), `
 				INSERT INTO order_item_modifiers (order_item_id, modifier_option_id, unit_price, name) VALUES (?, ?, ?, ?)`,
@@ -214,6 +216,11 @@ func (h *POSHandler) AddToOrder(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+
+	if err := emitItemsAdded(r.Context(), tx, orderID, itemIDs); err != nil {
+		serverError(w, "Error registrando evento", err)
+		return
 	}
 
 	if req.ClientRef != "" {

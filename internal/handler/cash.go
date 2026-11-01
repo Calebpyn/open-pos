@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/calebpyn/open-pos/internal/plugins"
 )
 
 // Denomination es un tipo de billete o moneda que se cuenta en el arqueo.
@@ -948,6 +950,12 @@ func (h *POSHandler) CloseCash(w http.ResponseWriter, r *http.Request) {
 		"open_orders":     rep.OpenOrders,
 	}); err != nil {
 		serverError(w, "Error registrando bitácora", err)
+		return
+	}
+	if err := plugins.Emit(ctx, tx, "cash.closed", map[string]any{
+		"cash_session_id": sessionID, "user_id": u.ID,
+	}); err != nil {
+		serverError(w, "Error registrando evento", err)
 		return
 	}
 	if err := tx.Commit(); err != nil {

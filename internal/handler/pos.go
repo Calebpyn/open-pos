@@ -6,11 +6,13 @@ import (
 	"net/http"
 
 	"github.com/calebpyn/open-pos/internal/domain"
+	"github.com/calebpyn/open-pos/internal/plugins"
 )
 
 type POSHandler struct {
 	DB        *sql.DB
 	BackupDir string // carpeta de respaldos de la base
+	Plugins   *plugins.Manager
 	logins    *loginLimiter
 }
 

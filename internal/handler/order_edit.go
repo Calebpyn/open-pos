@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/calebpyn/open-pos/internal/plugins"
 	"github.com/calebpyn/open-pos/internal/printer"
 )
 
@@ -158,6 +159,11 @@ func (h *POSHandler) EditOrderItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "El producto ya se cobró; no se puede editar", http.StatusConflict)
 		return
 	}
+	beforeEvent, err := eventItemByID(ctx, tx, itemID)
+	if err != nil {
+		serverError(w, "Error consultando el producto", err)
+		return
+	}
 	var beforeMods []int64
 	for _, s := range strings.Split(modIDs, ",") {
 		var id int64
@@ -214,6 +220,17 @@ func (h *POSHandler) EditOrderItem(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := syncOrderDelivered(ctx, tx, orderID); err != nil {
 		serverError(w, "Error actualizando la orden", err)
+		return
+	}
+	afterEvent, err := eventItemByID(ctx, tx, itemID)
+	if err != nil {
+		serverError(w, "Error consultando el producto", err)
+		return
+	}
+	if err := plugins.Emit(ctx, tx, "item.changed", map[string]any{
+		"order_id": orderID, "item_id": itemID, "before": beforeEvent, "after": afterEvent, "user_id": u.ID,
+	}); err != nil {
+		serverError(w, "Error registrando evento", err)
 		return
 	}
 	if err := auditBy(ctx, tx, u, r, "ITEM_EDITED", map[string]any{
@@ -357,6 +374,7 @@ func (h *POSHandler) AddItemsToOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var added []string
+	var addedIDs []int64
 	for _, it := range req.Items {
 		if it.Quantity < 1 || it.Quantity > 99 {
 			http.Error(w, "La cantidad debe estar entre 1 y 99", http.StatusBadRequest)
@@ -390,6 +408,7 @@ func (h *POSHandler) AddItemsToOrder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id, _ := res.LastInsertId()
+		addedIDs = append(addedIDs, id)
 		if err := replaceItemModifiers(ctx, tx, id, mods); err != nil {
 			serverError(w, "Error guardando modificadores", err)
 			return
@@ -399,6 +418,10 @@ func (h *POSHandler) AddItemsToOrder(w http.ResponseWriter, r *http.Request) {
 	// La orden vuelve a tener algo por entregar.
 	if err := syncOrderDelivered(ctx, tx, orderID); err != nil {
 		serverError(w, "Error actualizando la orden", err)
+		return
+	}
+	if err := emitItemsAdded(ctx, tx, orderID, addedIDs); err != nil {
+		serverError(w, "Error registrando evento", err)
 		return
 	}
 	if err := auditBy(ctx, tx, u, r, "ORDER_ITEMS_ADDED", map[string]any{

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Plugins · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/js/toast.js"></script>
+    <script>
+      function pluginsApp() {
+        return {
+          data: null,
+          busy: '',
+          init: function () {
+            this.load();
+            var self = this;
+            setInterval(function () { if (!self.busy) self.load(); }, 5000);
+          },
+          load: async function () {
+            var res = await fetch('/api/admin/plugins');
+            if (res.ok) this.data = await res.json();
+          },
+          act: async function (p, action) {
+            if (action === 'disable' && !confirm('¿Desactivar ' + p.name + '? Deja de recibir eventos hasta que lo actives de nuevo (no se pierde ninguno).')) return;
+            this.busy = p.id;
+            var res = await fetch('/api/admin/plugins/' + p.id + '/' + action, { method: 'POST' });
+            this.busy = '';
+            if (!res.ok) { toast((await res.text()) || 'No se pudo', 'error'); return; }
+            toast({ enable: 'Plugin activado', disable: 'Plugin desactivado', restart: 'Reiniciando plugin' }[action]);
+            setTimeout(this.load.bind(this), 600);
+          },
+          badge: function (p) {
+            if (p.state === 'corriendo') return 'bg-emerald-100 text-emerald-800';
+            if (!p.enabled) return 'bg-gray-100 text-gray-600';
+            return 'bg-amber-100 text-amber-800';
+          },
+          when: function (t) { return t && !t.startsWith('0001') ? new Date(t).toLocaleString('es-MX', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''; }
+        };
+      }
+    </script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased" x-data="pluginsApp()">
+    {{template "admin_nav" .}}
+
+    <main class="max-w-3xl mx-auto p-4 md:p-6 space-y-4">
+      <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+        <h2 class="text-lg font-black text-gray-900">🧩 Plugins</h2>
+        <p class="mt-1 text-xs text-gray-500">
+          Programas que se instalan sobre Open POS (por ejemplo, un inventario). Cada uno corre aparte:
+          si uno falla, la venta sigue funcionando. Solo instala plugins de alguien de confianza:
+          un plugin tiene acceso a esta computadora.
+        </p>
+        <p class="mt-2 text-xs text-gray-500">
+          Para instalar uno, copia su carpeta a <span class="font-mono">plugins/</span> junto a la base de datos y reinicia Open POS.
+        </p>
+      </section>
+
+      <template x-if="data && data.plugins.length === 0 && data.broken.length === 0">
+        <p class="text-sm text-gray-500 text-center py-6">No hay plugins instalados.</p>
+      </template>
+
+      <template x-for="p in (data ? data.plugins : [])" :key="p.id">
+        <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 space-y-3">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h3 class="text-base font-black text-gray-900">
+                <span x-text="p.name"></span>
+                <span class="text-xs font-mono text-gray-400" x-text="'v' + p.version"></span>
+              </h3>
+              <p class="text-xs text-gray-500" x-text="p.description"></p>
+            </div>
+            <span class="px-3 py-1 rounded-lg text-xs font-bold whitespace-nowrap" :class="badge(p)" x-text="p.state"></span>
+          </div>
+          <p x-show="p.error" x-text="'Último error: ' + p.error" class="text-xs font-semibold text-rose-600"></p>
+          <dl class="grid grid-cols-2 gap-2 text-xs">
+            <div><dt class="text-gray-400">Eventos por leer</dt><dd class="font-mono" x-text="p.pending"></dd></div>
+            <div><dt class="text-gray-400">Reinicios</dt><dd class="font-mono" x-text="p.restarts"></dd></div>
+            <div class="col-span-2"><dt class="text-gray-400">Permisos</dt><dd class="font-mono" x-text="p.permissions.join(', ') || '—'"></dd></div>
+            <div class="col-span-2"><dt class="text-gray-400">Carpeta</dt><dd class="font-mono break-all" x-text="p.dir"></dd></div>
+            <div class="col-span-2"><dt class="text-gray-400">Datos</dt><dd class="font-mono break-all" x-text="p.data_dir"></dd></div>
+          </dl>
+          <p x-show="p.dev" class="text-xs text-gray-500 bg-gray-50 rounded-lg px-3 py-2">
+            En desarrollo (POS_PLUGIN_DEV): Open POS no lo arranca; córrelo tú con <span class="font-mono">go run .</span> en su carpeta.
+          </p>
+          <div class="flex gap-2">
+            <template x-if="p.admin_label && (p.enabled || p.dev)">
+              <a :href="'/admin/plugins/' + p.id + '/'" class="px-3 py-2 rounded-xl text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white">Abrir</a>
+            </template>
+            <template x-if="!p.dev && p.enabled">
+              <button type="button" @click="act(p, 'restart')" :disabled="busy === p.id" class="px-3 py-2 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200 disabled:opacity-50">Reiniciar</button>
+            </template>
+            <template x-if="!p.dev">
+              <button type="button" @click="act(p, p.enabled ? 'disable' : 'enable')" :disabled="busy === p.id"
+                      class="px-3 py-2 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
+                      x-text="p.enabled ? 'Desactivar' : 'Activar'"></button>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <template x-for="b in (data ? data.broken : [])" :key="b.dir">
+        <section class="bg-white rounded-2xl border border-rose-200 shadow-sm p-6">
+          <h3 class="text-sm font-black text-rose-700">No se pudo cargar</h3>
+          <p class="text-xs font-mono text-gray-500 break-all" x-text="b.dir"></p>
+          <p class="mt-1 text-xs text-rose-600" x-text="b.error"></p>
+        </section>
+      </template>
+    </main>
+  </body>
+</html>

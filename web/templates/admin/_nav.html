@@ -8,7 +8,7 @@
     {{- end }}
     <h1 class="text-base font-black whitespace-nowrap">⚙️ Administración</h1>
     <nav class="flex-1 flex gap-1 overflow-x-auto">
-      {{- range $s := adminSections }}
+      {{- range $s := $.Sections }}
       <a href="/admin/{{$s.Key}}"
          class="px-3 py-1.5 rounded-lg text-xs whitespace-nowrap transition {{if eq $s.Key $.Section}}bg-emerald-500 text-slate-950 font-black{{else}}text-gray-300 hover:text-white hover:bg-slate-800{{end}}">
         {{$s.Label}}

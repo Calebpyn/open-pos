@@ -646,6 +646,10 @@ func (h *POSHandler) adminWrite(w http.ResponseWriter, r *http.Request, action s
 			serverError(w, "Error registrando bitácora", err)
 			return
 		}
+		if err := emitCatalogChanged(ctx, tx, action, details); err != nil {
+			serverError(w, "Error registrando evento", err)
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		serverError(w, "Error guardando cambios", err)

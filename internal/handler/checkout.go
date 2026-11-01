@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/calebpyn/open-pos/internal/plugins"
 )
 
 // queryer lo cumplen *sql.DB y *sql.Tx.
@@ -534,6 +536,11 @@ func (h *POSHandler) PayOrder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if err := emitBillPaid(ctx, tx, orderID, billID, billNumber, totals.Total, totals.Tip); err != nil {
+		serverError(w, "Error registrando evento", err)
+		return
+	}
+
 	remaining, err := countPendingItems(ctx, tx, orderID)
 	if err != nil {
 		serverError(w, "Error consultando productos pendientes", err)
@@ -700,11 +707,27 @@ func (h *POSHandler) CancelOrder(w http.ResponseWriter, r *http.Request) {
 	newStatus, action := "CANCELLED", "ORDER_CANCELLED"
 	if bills > 0 {
 		newStatus, action = "PAID", "ORDER_CLOSED_WITH_BALANCE"
+		pending, err := eventItems(ctx, tx, `oi.order_id = ? AND oi.bill_id IS NULL AND oi.status != 'VOID'`, orderID)
+		if err != nil {
+			serverError(w, "Error consultando productos", err)
+			return
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE order_items SET status = 'VOID'
 			WHERE order_id = ? AND bill_id IS NULL AND status != 'VOID'`, orderID); err != nil {
 			serverError(w, "Error anulando lo pendiente", err)
 			return
+		}
+		if len(pending) > 0 {
+			for i := range pending {
+				pending[i].Status = "VOID"
+			}
+			if err := plugins.Emit(ctx, tx, "item.voided", map[string]any{
+				"order_id": orderID, "reason": reason, "items": pending,
+			}); err != nil {
+				serverError(w, "Error registrando evento", err)
+				return
+			}
 		}
 	}
 	if err := finishOrder(ctx, tx, orderID, sessionID, newStatus, reason); err != nil {
@@ -800,6 +823,16 @@ func (h *POSHandler) VoidItem(w http.ResponseWriter, r *http.Request) {
 		serverError(w, "Error anulando el producto", err)
 		return
 	}
+	voided, err := eventItemByID(ctx, tx, itemID)
+	if err == nil {
+		err = plugins.Emit(ctx, tx, "item.voided", map[string]any{
+			"order_id": orderID, "reason": reason, "items": []eventItem{voided},
+		})
+	}
+	if err != nil {
+		serverError(w, "Error registrando evento", err)
+		return
+	}
 	if err := audit(ctx, tx, "ITEM_VOID", map[string]any{
 		"order_id": orderID, "order_item_id": itemID, "product": productName,
 		"quantity": qty, "unit_price": price, "reason": reason,
@@ -862,6 +895,29 @@ func (h *POSHandler) DeliverOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	// Entregar la orden completa tacha también los productos que faltaban.
 	if n, _ := res.RowsAffected(); n > 0 {
+		var delivered []map[string]any
+		if err := eachRow(ctx, tx, `
+			SELECT id, quantity - delivered_quantity FROM order_items
+			WHERE order_id = ? AND status != 'VOID' AND delivered_quantity < quantity ORDER BY id`,
+			[]any{orderID}, func(scan func(...any) error) error {
+				var id, delta int64
+				if err := scan(&id, &delta); err != nil {
+					return err
+				}
+				delivered = append(delivered, map[string]any{"item_id": id, "delta": delta})
+				return nil
+			}); err != nil {
+			serverError(w, "Error consultando los productos", err)
+			return
+		}
+		if len(delivered) > 0 {
+			if err := plugins.Emit(ctx, tx, "items.delivered", map[string]any{
+				"order_id": orderID, "items": delivered, "user_id": terminalUser(ctx),
+			}); err != nil {
+				serverError(w, "Error registrando evento", err)
+				return
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE order_items SET delivered_quantity = quantity, delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
 			WHERE order_id = ? AND status != 'VOID' AND delivered_quantity < quantity`, orderID); err != nil {
@@ -925,6 +981,16 @@ func countPendingItems(ctx context.Context, tx *sql.Tx, orderID int64) (int, err
 // finishOrder cierra la orden y, si era la última activa de la sesión,
 // cierra la sesión y libera la mesa.
 func finishOrder(ctx context.Context, tx *sql.Tx, orderID, sessionID int64, status, cancelReason string) error {
+	// Lo que quedaba sin cobrar: en una cancelada es lo que no se vendió.
+	open, err := eventItems(ctx, tx, `oi.order_id = ? AND oi.bill_id IS NULL AND oi.status != 'VOID'`, orderID)
+	if err != nil {
+		return err
+	}
+	if err := plugins.Emit(ctx, tx, "order.closed", map[string]any{
+		"order_id": orderID, "status": status, "reason": cancelReason, "unpaid_items": open,
+	}); err != nil {
+		return err
+	}
 	// En comedor la comida ya se entregó al cobrar; las canceladas no deben
 	// quedarse esperando entrega en Expo.
 	if _, err := tx.ExecContext(ctx, `
@@ -950,7 +1016,7 @@ func finishOrder(ctx context.Context, tx *sql.Tx, orderID, sessionID int64, stat
 		WHERE id = ? AND status = 'OPEN'`, sessionID); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		UPDATE dining_tables SET status = 'FREE'
 		WHERE id = (SELECT table_id FROM table_sessions WHERE id = ?)`, sessionID)
 	return err
@@ -1041,6 +1107,15 @@ func splitOrderItem(ctx context.Context, tx *sql.Tx, id, take int64) (int64, err
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO order_item_modifiers (order_item_id, modifier_option_id, unit_price, name)
 		SELECT ?, modifier_option_id, unit_price, name FROM order_item_modifiers WHERE order_item_id = ?`, newID, id); err != nil {
+		return 0, err
+	}
+	var orderID int64
+	if err := tx.QueryRowContext(ctx, `SELECT order_id FROM order_items WHERE id = ?`, id).Scan(&orderID); err != nil {
+		return 0, err
+	}
+	if err := plugins.Emit(ctx, tx, "item.split", map[string]any{
+		"order_id": orderID, "item_id": id, "new_item_id": newID, "quantity": take, "remaining": rest,
+	}); err != nil {
 		return 0, err
 	}
 	return newID, nil

@@ -1,0 +1,10 @@
+{
+  "id": "hola",
+  "name": "Hola mundo",
+  "version": "0.1.0",
+  "description": "Ejemplo de plugin: cuenta las ventas, muestra lo más vendido y puede marcar productos agotados.",
+  "api_version": 1,
+  "executable": "hola",
+  "permissions": ["events:read", "catalog:read", "products:availability"],
+  "admin": { "label": "👋 Hola" }
+}

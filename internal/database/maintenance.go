@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -60,6 +61,10 @@ var backupNameRe = regexp.MustCompile(`^pos-\d{8}-\d{6}\.db$`)
 // ValidBackupName evita que un nombre recibido por la API salga de la carpeta.
 func ValidBackupName(name string) bool { return backupNameRe.MatchString(name) }
 
+// AfterBackup, si está, corre después de cada respaldo de la base (los
+// plugins respaldan ahí sus propios datos). stamp es la fecha del respaldo.
+var AfterBackup func(ctx context.Context, dir, stamp string, keep int)
+
 // CreateBackup guarda una copia consistente y compacta de la base en dir
 // (VACUUM INTO funciona con el POS en uso) y deja solo los keep más recientes.
 func CreateBackup(ctx context.Context, db *sql.DB, dir string, keep int) (Backup, error) {
@@ -77,6 +82,9 @@ func CreateBackup(ctx context.Context, db *sql.DB, dir string, keep int) (Backup
 	}
 	if err := pruneBackups(dir, keep); err != nil {
 		log.Printf("No se pudieron borrar respaldos viejos: %v", err)
+	}
+	if AfterBackup != nil {
+		AfterBackup(ctx, dir, strings.TrimSuffix(strings.TrimPrefix(name, "pos-"), ".db"), keep)
 	}
 	return Backup{Name: name, Size: info.Size(), CreatedAt: info.ModTime()}, nil
 }

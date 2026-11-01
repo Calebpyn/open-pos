@@ -35,3 +35,12 @@ jobs:
 
       - name: Compila el servidor
         run: go build -o /dev/null ./cmd/pos
+
+      # El SDK y el plugin de ejemplo son módulos aparte.
+      - name: SDK de plugins
+        working-directory: sdk
+        run: go vet ./... && go test -race ./...
+
+      - name: Plugin de ejemplo
+        working-directory: examples/plugins/hola
+        run: go vet ./... && go build -o /dev/null .

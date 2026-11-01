@@ -3,6 +3,8 @@ pos.db
 pos.db-*
 respaldos/
 backups/
+/plugins/
+/plugins-datos/
 
 # Compilados
 /open-pos
