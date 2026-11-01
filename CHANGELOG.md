@@ -8,6 +8,14 @@ En cada versión se indica si trae **cambios a la base de datos**. Esas
 versiones hacen un respaldo automático antes de aplicarlos, y conviene
 instalarlas al cierre, sin mesas abiertas.
 
+## [Sin publicar]
+
+### Cambiado
+- **Compras queda apagado.** La lista de compras se va a una aplicación
+  aparte, en la nube, para usarla desde cualquier lugar. En Open POS ya no
+  aparece ni responde; sus tablas y datos se conservan (se reactiva con
+  `compras_enabled = 1` en `settings`).
+
 ## [0.8.0-beta] - 2026-10-08
 
 ### Agregado

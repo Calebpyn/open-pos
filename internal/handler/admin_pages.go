@@ -33,7 +33,11 @@ var adminFuncs = template.FuncMap{}
 // Configuración, las de los plugins instalados.
 func (h *POSHandler) navSections(ctx context.Context) []adminSection {
 	out := make([]adminSection, 0, len(adminSectionList)+4)
+	compras := comprasEnabled(ctx, h.DB)
 	for _, s := range adminSectionList {
+		if s.Key == "compras" && !compras {
+			continue
+		}
 		if s.Key == "configuracion" {
 			for _, p := range h.Plugins.List() {
 				if p.Admin != nil {
@@ -66,6 +70,9 @@ func (h *UIHandler) ServeAdminPage(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if s.File == "" {
+			if !comprasEnabled(r.Context(), h.POS.DB) {
+				break
+			}
 			h.POS.ComprasAdmin(w, r)
 			return
 		}

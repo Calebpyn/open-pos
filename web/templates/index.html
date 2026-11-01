@@ -657,6 +657,7 @@
           >
             📡 <span class="hidden sm:inline">Monitor </span>Expo{{if not .Waiter}}<span class="hidden sm:inline"> / Caja</span>{{end}}
           </button>
+          {{- if .Compras }}
           <a
             href="/compras"
             title="Lista de compras: anota lo que falta"
@@ -664,6 +665,7 @@
           >
             📝<span class="hidden sm:inline"> Compras</span>
           </a>
+          {{- end }}
         </nav>
       </div>
 

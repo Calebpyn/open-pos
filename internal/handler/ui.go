@@ -19,7 +19,8 @@ func NewUIHandler(pos *POSHandler) *UIHandler {
 // ni admin) y se pide PIN.
 func (h *UIHandler) ServeIndex(w http.ResponseWriter, r *http.Request) {
 	t := terminalFrom(r.Context())
-	renderPage(w, map[string]any{"Terminal": t, "Waiter": t.Kind == TerminalWaiter}, "index.html")
+	renderPage(w, map[string]any{"Terminal": t, "Waiter": t.Kind == TerminalWaiter,
+		"Compras": comprasEnabled(r.Context(), h.POS.DB)}, "index.html")
 }
 
 // esc escapa texto para insertarlo en HTML.

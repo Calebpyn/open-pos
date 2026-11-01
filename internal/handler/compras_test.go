@@ -34,6 +34,7 @@ func newComprasEnv(t *testing.T) *comprasEnv {
 	mux.HandleFunc("GET /", func(http.ResponseWriter, *http.Request) {})
 	mux.HandleFunc("GET /admin/{section}", h.RequireAdmin(NewUIHandler(h).ServeAdminPage))
 	h.RegisterComprasRoutes(mux)
+	exec(t, db, `INSERT INTO settings (key, value) VALUES ('compras_enabled', '1')`)
 	t.Chdir("../..") // plantillas
 	return &comprasEnv{t: t, db: db, h: h, mux: mux, cookie: adminLogin(t, h, "0001")}
 }
@@ -560,3 +561,40 @@ func TestBackupTicketImages(t *testing.T) {
 }
 
 // Compras viene apagado: no responde ni aparece en el POS o el panel.
+func TestComprasDisabledByDefault(t *testing.T) {
+	db, h := setupCashDB(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /admin/{section}", h.RequireAdmin(NewUIHandler(h).ServeAdminPage))
+	h.RegisterComprasRoutes(mux)
+	t.Chdir("../..")
+	cookie := adminLogin(t, h, "0001")
+	for _, path := range []string{"/compras", "/compras/comprar", "/compras/tickets", "/admin/compras"} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.AddCookie(cookie)
+		req = req.WithContext(context.WithValue(req.Context(), ctxTerminal, central))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s apagado: %d", path, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	NewUIHandler(h).ServeIndex(rec, httptest.NewRequest("GET", "/", nil))
+	if strings.Contains(rec.Body.String(), `href="/compras"`) {
+		t.Error("el POS no debe mostrar la pestaña de Compras")
+	}
+	req := httptest.NewRequest("GET", "/admin/reportes", nil)
+	req.SetPathValue("section", "reportes")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.RequireAdmin(NewUIHandler(h).ServeAdminPage)(rec, req)
+	if strings.Contains(rec.Body.String(), "🛒 Compras") {
+		t.Error("el panel no debe mostrar Compras")
+	}
+	exec(t, db, `INSERT INTO settings (key, value) VALUES ('compras_enabled', '1')`)
+	rec = httptest.NewRecorder()
+	NewUIHandler(h).ServeIndex(rec, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rec.Body.String(), `href="/compras"`) {
+		t.Error("encendido, la pestaña vuelve")
+	}
+}

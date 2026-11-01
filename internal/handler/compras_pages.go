@@ -10,8 +10,20 @@ import (
 )
 
 // RegisterComprasRoutes agrega las pantallas de Compras y su administración.
+//
+// Compras está apagado por omisión (se va a una app aparte, en la nube): sin
+// compras_enabled = 1 en settings estas rutas responden 404 y no aparece en
+// el POS ni en el panel. Las tablas y los datos se conservan.
 func (h *POSHandler) RegisterComprasRoutes(mux *http.ServeMux) {
-	handle := mux.HandleFunc
+	handle := func(pattern string, fn http.HandlerFunc) {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			if !comprasEnabled(r.Context(), h.DB) {
+				http.NotFound(w, r)
+				return
+			}
+			fn(w, r)
+		})
+	}
 	handle("GET /compras", h.comprasPage(nil, h.ComprasRequestPage))
 	handle("POST /compras/pedir/{id}", h.comprasPage(nil, h.ComprasRequest))
 	handle("POST /compras/pedir/{id}/quitar", h.comprasPage(nil, h.ComprasWithdraw))
@@ -38,6 +50,13 @@ func (h *POSHandler) RegisterComprasRoutes(mux *http.ServeMux) {
 	handle("POST /admin/compras/lugares/{id}", admin(h.ComprasSavePlace))
 	handle("POST /admin/compras/surten/{id}", admin(h.ComprasSetShopper))
 	handle("POST /admin/compras/importar", admin(h.ComprasImport))
+}
+
+// comprasEnabled indica si el módulo de Compras está encendido.
+func comprasEnabled(ctx context.Context, q queryer) bool {
+	var v string
+	q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'compras_enabled'`).Scan(&v)
+	return v == "1"
 }
 
 const ctxCompras ctxKey = 300

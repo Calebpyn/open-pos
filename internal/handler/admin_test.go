@@ -241,6 +241,9 @@ func TestAdminPagesRender(t *testing.T) {
 	ui := NewUIHandler(h)
 	t.Chdir("../..")
 	for _, s := range adminSectionList {
+		if s.Key == "compras" {
+			continue // apagado por omisión (ver TestComprasDisabledByDefault)
+		}
 		req := httptest.NewRequest("GET", "/admin/"+s.Key, nil)
 		req.SetPathValue("section", s.Key)
 		req.AddCookie(cookie)
