@@ -40,6 +40,15 @@ for arch in arm64 x86_64; do
 		-o "$work/OpenPOS-$arch" "$PKG"/app/*.swift
 done
 lipo -create -output "$app/Contents/MacOS/OpenPOS" "$work/OpenPOS-arm64" "$work/OpenPOS-x86_64"
+
+echo "Compilando lector de tickets (OCR)..."
+# Va junto al servidor: Open POS lo busca al lado de su ejecutable.
+for arch in arm64 x86_64; do
+	# shellcheck disable=SC2086
+	swiftc -swift-version 5 -O -target $arch-apple-macos12 $overlay \
+		-o "$work/open-pos-ocr-$arch" "$PKG"/ocr/main.swift
+done
+lipo -create -output "$app/Contents/Resources/open-pos-ocr" "$work/open-pos-ocr-arm64" "$work/open-pos-ocr-x86_64"
 printf '%s\n' "$VERSION" > "$app/Contents/Resources/version.txt"
 sed "s/__VERSION__/$VERSION/g" "$PKG/Info.plist" > "$app/Contents/Info.plist"
 
@@ -55,6 +64,7 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 # Firma local (ad-hoc): Apple Silicon no ejecuta binarios sin firma. No evita
 # el aviso de Gatekeeper; para eso haría falta una cuenta de Apple Developer.
 codesign --force -s - "$app/Contents/Resources/open-pos"
+codesign --force -s - "$app/Contents/Resources/open-pos-ocr"
 codesign --force -s - "$app"
 
 sed "s/__VERSION__/$VERSION/g" "$PKG/Léeme.txt" > "$stage/Léeme.txt"

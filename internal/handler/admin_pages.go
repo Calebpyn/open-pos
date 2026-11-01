@@ -22,6 +22,7 @@ var adminSectionList = []adminSection{
 	{"usuarios", "👥 Usuarios", "admin/usuarios.html"},
 	{"dispositivos", "🖨️ Dispositivos", "devices.html"},
 	{"impresiones", "🧾 Impresiones", "admin/impresiones.html"},
+	{"compras", "🛒 Compras", ""}, // páginas propias: ComprasAdmin
 	{"configuracion", "🏪 Configuración", "admin/configuracion.html"},
 	{"plugins", "🧩 Plugins", "admin/plugins.html"},
 }
@@ -63,6 +64,10 @@ func (h *UIHandler) ServeAdminPage(w http.ResponseWriter, r *http.Request) {
 	for _, s := range adminSectionList {
 		if s.Key != key {
 			continue
+		}
+		if s.File == "" {
+			h.POS.ComprasAdmin(w, r)
+			return
 		}
 		renderPage(w, h.POS.adminPageData(r, s.Key), s.File, "admin/_nav.html")
 		return

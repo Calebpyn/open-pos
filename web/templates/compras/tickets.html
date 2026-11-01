@@ -1,0 +1,48 @@
+{{template "compras_layout" .}}
+{{define "compras_title"}}Tickets{{end}}
+{{define "compras_content"}}
+{{template "compras_error" .Error}}
+<form method="post" action="/compras/tickets" enctype="multipart/form-data" x-data="{ reading: false }" @submit="reading = true"
+      class="bg-slate-900 text-white rounded-2xl p-4 mb-4">
+  <h2 class="text-lg font-black">🧾 Registrar una compra</h2>
+  <p class="text-xs text-slate-300 mt-1">Toma foto del ticket: se leen la tienda, la fecha, el total y los productos. Lo revisas, y lo que estaba en la lista se tacha solo.</p>
+  {{if not .OCR}}<p class="text-xs text-amber-300 mt-1">Este equipo no lee tickets automáticamente: la foto se guarda y capturas los productos a mano.</p>{{end}}
+  <label class="mt-3 block text-center py-3 rounded-xl bg-emerald-500 text-emerald-950 font-black cursor-pointer" x-show="!reading">
+    📷 Tomar o elegir foto
+    <input type="file" name="photo" accept="image/*" capture="environment" class="hidden" required @change="reading = true; $el.form.submit()" />
+  </label>
+  <p x-cloak x-show="reading" class="mt-3 text-center py-3 rounded-xl bg-slate-800 font-bold animate-pulse">Leyendo el ticket…</p>
+</form>
+
+{{if .MonthTotal}}
+<section class="bg-white rounded-2xl border border-gray-200 p-4 mb-4">
+  <div class="flex items-baseline justify-between">
+    <h2 class="font-black">Registrado en {{.MonthName}}</h2>
+    <span class="text-lg font-black">{{cents .MonthTotal}}</span>
+  </div>
+  <div class="mt-2 space-y-1 text-sm">
+    {{range .Month}}
+    <div class="flex justify-between"><span class="text-gray-600">{{.Place}} <span class="text-xs text-gray-400">· {{.Count}} {{if eq .Count 1}}ticket{{else}}tickets{{end}}</span></span><span class="font-semibold">{{cents .Cents}}</span></div>
+    {{end}}
+  </div>
+</section>
+{{end}}
+
+<section>
+  <h3 class="text-xs font-black uppercase tracking-wide text-gray-500 mb-2">Tickets</h3>
+  <div class="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
+    {{range .Receipts}}
+    <a href="/compras/tickets/{{.ID}}" class="px-4 py-3 flex items-center gap-3 text-sm hover:bg-gray-50">
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold truncate">{{if .Place}}{{.Place}}{{else}}Sin tienda{{end}} <span class="text-xs font-normal text-gray-500">· {{.DateLabel}}</span></p>
+        <p class="text-xs text-gray-500 truncate">{{.Lines}} {{if eq .Lines 1}}producto{{else}}productos{{end}} · subió {{.UploadedBy}}</p>
+      </div>
+      {{if eq .Status "DRAFT"}}<span class="px-2 py-0.5 rounded-md text-[11px] font-black bg-amber-100 text-amber-800">Por revisar</span>{{end}}
+      <span class="font-bold">{{if .TotalCents}}{{centsPtr .TotalCents}}{{else}}{{cents .LinesCents}}{{end}}</span>
+    </a>
+    {{else}}
+    <p class="px-4 py-6 text-sm text-gray-500 text-center">Todavía no hay tickets.</p>
+    {{end}}
+  </div>
+</section>
+{{end}}

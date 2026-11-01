@@ -657,6 +657,13 @@
           >
             📡 <span class="hidden sm:inline">Monitor </span>Expo{{if not .Waiter}}<span class="hidden sm:inline"> / Caja</span>{{end}}
           </button>
+          <a
+            href="/compras"
+            title="Lista de compras: anota lo que falta"
+            class="px-3 sm:px-4 py-1.5 rounded-lg text-xs transition text-gray-300 hover:text-white whitespace-nowrap flex items-center"
+          >
+            📝<span class="hidden sm:inline"> Compras</span>
+          </a>
         </nav>
       </div>
 
@@ -672,12 +679,12 @@
         <a
           href="/caja"
           class="text-xs text-gray-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg transition"
-          >💵 Caja</a
+          >💵<span class="hidden sm:inline"> Caja</span></a
         >
         <a
           href="/admin"
           class="text-xs text-gray-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg transition"
-          >⚙️ Admin</a
+          >⚙️<span class="hidden sm:inline"> Admin</span></a
         >
         {{- end }}
         <div

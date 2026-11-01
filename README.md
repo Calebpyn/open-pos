@@ -104,6 +104,13 @@ dentro del instalador.
 - Turnos de caja con **arqueo ciego**, gastos, conciliación de terminal de tarjeta y corte impreso.
 - Botón para abrir el cajón de dinero conectado a la impresora.
 
+**Lista de compras** (`/compras`)
+- Reemplaza la hoja de papel de "falta / urge": cada quien anota desde su terminal lo que falta, con nota.
+- Quien surte la ve **por lugar** (Costco, mercado, proveedor) con presupuesto estimado, alternativas y sustitutos, y va tachando y anotando lo que pagó.
+- Lo que no se compró pasa solo a la siguiente lista; se manda por WhatsApp con un botón.
+- Catálogo de insumos y lugares en Administración, con importación desde Excel (CSV).
+- **Tickets con OCR**: foto del ticket desde el teléfono → se leen tienda, fecha, total y productos (OCR de macOS, sin internet), se relacionan con los insumos y se registra la compra.
+
 **Administración** (`/admin`)
 - Reportes de ventas, productos, métodos de pago, propinas y **tiempos de salida por área**.
 - **Historial** de órdenes y pagos con detalle, bitácora y reimpresión de tickets.
@@ -138,7 +145,7 @@ internal/printer/        ESC/POS, cola por impresora, CUPS y red
 web/templates/           páginas (POS, cobro, caja, admin)
 web/static/              CSS precompilado, JS propio y librerías (vendor/)
 packaging/macos/         app de Mac (Swift), ícono, Info.plist y Léeme del instalador
-scripts/                 build-dmg.sh (instalador) y build-css.sh (CSS)
+scripts/                 build-dmg.sh (instalador), build-css.sh (CSS) y build-ocr.sh (lector de tickets)
 ```
 
 ## Requisitos
@@ -178,6 +185,13 @@ Si usas clases de Tailwind nuevas en las plantillas, regenera el CSS:
 
 ```bash
 scripts/build-css.sh
+```
+
+Para leer tickets de compra en desarrollo, compila el lector (OCR de macOS) en
+`bin/open-pos-ocr`; el instalador ya lo incluye:
+
+```bash
+scripts/build-ocr.sh
 ```
 
 ## Instalador para la Mac del negocio

@@ -33,7 +33,7 @@ func page(files ...string) (*template.Template, error) {
 	for i, f := range files {
 		paths[i] = "templates/" + f
 	}
-	t, err := template.New(path.Base(files[0])).Funcs(pageFuncs).Funcs(adminFuncs).Funcs(devFuncs).ParseFS(web.FS(), paths...)
+	t, err := template.New(path.Base(files[0])).Funcs(pageFuncs).Funcs(adminFuncs).Funcs(devFuncs).Funcs(comprasFuncs).ParseFS(web.FS(), paths...)
 	if err != nil {
 		return nil, err
 	}

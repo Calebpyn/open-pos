@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{if .Supply.ID}}{{.Supply.Name}}{{else}}Nuevo insumo{{end}} · Compras · Admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak] { display: none !important; }</style>
+    <script>
+      var initialSources = {{.SourceRows}};
+      // Lugares del insumo en orden de prioridad (el primero es el de siempre).
+      // Cada lugar puede tener su presentación (burbuja de 400 g, de 200 g…)
+      // o venderse a granel; el "más barato" compara el precio por kg/L/pieza.
+      var unitBase = { g: ['kg', 0.001], kg: ['kg', 1], ml: ['L', 0.001], L: ['L', 1], pz: ['pz', 1] };
+      var unitAlias = { g: 'g', gr: 'g', grs: 'g', gramo: 'g', gramos: 'g', kg: 'kg', kgs: 'kg', kilo: 'kg', kilos: 'kg',
+        ml: 'ml', mililitros: 'ml', l: 'L', lt: 'L', lts: 'L', litro: 'L', litros: 'L',
+        pz: 'pz', pza: 'pz', pzas: 'pz', pieza: 'pz', piezas: 'pz' };
+      function parseContent(label) {
+        var num = function (s) { return parseFloat(String(s).replace(',', '.')); };
+        var m = /(\d+)\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*([a-zA-Z]+)\b/.exec(label || '');
+        if (m && unitAlias[m[3].toLowerCase()]) return { qty: num(m[1]) * num(m[2]), unit: unitAlias[m[3].toLowerCase()] };
+        var re = /(\d+(?:[.,]\d+)?)\s*([a-zA-Z]+)\b/g, x;
+        while ((x = re.exec(label || ''))) {
+          if (unitAlias[x[2].toLowerCase()] && num(x[1]) > 0) return { qty: num(x[1]), unit: unitAlias[x[2].toLowerCase()] };
+        }
+        return null;
+      }
+      function sourcesForm(initial) {
+        var seq = 0;
+        var blank = function () { return { place: '', brand: '', price: '', note: '', pack: '', qty: '', unit: 'g', byWeight: false }; };
+        var withKey = function (r) { r.key = ++seq; if (!r.unit) r.unit = 'g'; return r; };
+        return {
+          rows: initial.length ? initial.map(withKey) : [withKey(blank())],
+          init: function () {
+            var self = this;
+            this.rows.forEach(function (r) { self.autofill(r, false); });
+            var unit = document.querySelector('[name=unit]');
+            if (unit) unit.addEventListener('change', function () { self.rows.forEach(function (r) { self.autofill(r, false); }); });
+          },
+          supplyUnit: function () { var u = document.querySelector('[name=unit]'); return u ? u.value.trim() : ''; },
+          // Llena el contenido desde el texto de la presentación ("Burbuja 400 g").
+          autofill: function (r, force) {
+            if (r.byWeight || (r.qty && !force)) return;
+            var c = parseContent(r.pack || this.supplyUnit());
+            if (c) { r.qty = String(c.qty); r.unit = c.unit; }
+          },
+          add: function () { this.rows.push(withKey(blank())); },
+          move: function (i, d) {
+            var j = i + d;
+            if (j < 0 || j >= this.rows.length) return;
+            var r = this.rows.splice(i, 1)[0];
+            this.rows.splice(j, 0, r);
+          },
+          price: function (r) {
+            var n = parseFloat(String(r.price || '').replace(/[$,\s]/g, ''));
+            return isNaN(n) ? null : n;
+          },
+          // Precio por kg, L o pieza: { v, base } o null.
+          unitPrice: function (r) {
+            var p = this.price(r);
+            if (p === null) return null;
+            if (r.byWeight) return { v: p, base: 'kg' };
+            var q = parseFloat(String(r.qty || '').replace(',', '.')), u = unitBase[r.unit];
+            if (!u || !(q > 0)) return null;
+            return { v: p / (q * u[1]), base: u[0] };
+          },
+          unitLabel: function (r) {
+            var u = this.unitPrice(r);
+            return u ? '$' + u.v.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '/' + u.base : '';
+          },
+          // El más barato: por kg/L/pieza si se puede comparar con el 1º; si no, por precio.
+          cheapest: function () {
+            var self = this, first = this.rows.length ? this.unitPrice(this.rows[0]) : null, best = null, idx = -1;
+            this.rows.forEach(function (r, i) {
+              if (!r.place) return;
+              var v;
+              if (first) {
+                var u = self.unitPrice(r);
+                if (!u || u.base !== first.base) return;
+                v = u.v;
+              } else {
+                v = self.price(r);
+                if (v === null) return;
+              }
+              if (best === null || v < best) { best = v; idx = i; }
+            });
+            return idx;
+          },
+          sortByPrice: function () {
+            var self = this;
+            var key = function (r) { var u = self.unitPrice(r); return u ? u.v : self.price(r); };
+            this.rows.sort(function (a, b) {
+              var pa = key(a), pb = key(b);
+              if (pa === null) return pb === null ? 0 : 1;
+              if (pb === null) return -1;
+              return pa - pb;
+            });
+          }
+        };
+      }
+    </script>
+  </head>
+  <body class="bg-gray-100 min-h-screen font-sans antialiased">
+    {{template "admin_nav" .}}
+    {{$s := .Supply}}
+    <main class="max-w-2xl mx-auto p-4 md:p-6">
+      <a href="/admin/compras" class="text-sm text-gray-500">← Insumos</a>
+      <h1 class="text-xl font-black mt-1 mb-3">{{if $s.ID}}{{$s.Name}}{{else}}Nuevo insumo{{end}}</h1>
+      {{with .Error}}<p class="bg-rose-50 text-rose-700 text-sm font-semibold rounded-lg px-3 py-2 mb-3">{{.}}</p>{{end}}
+      <form method="post" action="/admin/compras/insumos{{if $s.ID}}/{{$s.ID}}{{end}}" class="space-y-4">
+        <section class="bg-white rounded-2xl border border-gray-200 p-4 space-y-3">
+          <label class="block"><span class="text-xs font-bold text-gray-700">Nombre</span>
+            <input name="name" value="{{$s.Name}}" required class="mt-1 w-full p-2.5 border border-gray-300 rounded-lg" placeholder="Leche entera" /></label>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="block"><span class="text-xs font-bold text-gray-700">Presentación</span>
+              <input name="unit" value="{{$s.Unit}}" class="mt-1 w-full p-2.5 border border-gray-300 rounded-lg" placeholder="Caja 12 × 1 L" /></label>
+            <label class="block"><span class="text-xs font-bold text-gray-700">Categoría</span>
+              <input name="category" value="{{$s.Category}}" list="cats" class="mt-1 w-full p-2.5 border border-gray-300 rounded-lg" placeholder="Lácteos" /></label>
+          </div>
+          <label class="block"><span class="text-xs font-bold text-gray-700">Dónde se guarda en el local</span>
+            <span class="block text-[11px] text-gray-400">Así se ordena la hoja para quien pide: refri, alacena, barra…</span>
+            <input name="location" value="{{$s.Location}}" list="locs" class="mt-1 w-full p-2.5 border border-gray-300 rounded-lg" placeholder="Refri de barra" /></label>
+          <label class="block"><span class="text-xs font-bold text-gray-700">Notas</span>
+            <textarea name="notes" rows="2" class="mt-1 w-full p-2.5 border border-gray-300 rounded-lg">{{$s.Notes}}</textarea></label>
+          {{if $s.ID}}
+          <label class="flex items-center gap-2 text-sm"><input type="hidden" name="active" value="0" />
+            <input type="checkbox" name="active" value="1" {{if $s.Active}}checked{{end}} /> Activo (desmarca para archivarlo)</label>
+          {{end}}
+        </section>
+
+        <section class="bg-white rounded-2xl border border-gray-200 p-4" x-data="sourcesForm(initialSources)">
+          <div class="flex items-start justify-between gap-3">
+            <h2 class="font-black">Dónde se compra</h2>
+            <button type="button" x-show="rows.length > 1" @click="sortByPrice()" class="text-xs font-bold text-gray-600 underline whitespace-nowrap">Ordenar por precio</button>
+          </div>
+          <p class="text-xs text-gray-500 mb-3">En orden de prioridad: el <b>1º</b> es donde conviene comprarlo; si ahí no hay, quien surte ve los demás en este orden. Usa ▲▼ para cambiarlo. Si en un lugar viene en otra presentación (burbuja de 400 g vs 200 g) anótala: el más barato se compara por kilo.
+            {{if not .Places}}<a href="/admin/compras?tab=lugares" class="underline font-bold">Primero da de alta los lugares</a>.{{end}}</p>
+          <template x-for="(r, i) in rows" :key="r.key">
+            <div class="rounded-xl border p-3 mb-2" :class="i === 0 ? 'border-emerald-300 bg-emerald-50/40' : 'border-gray-200'">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="px-2 py-0.5 rounded-md text-[11px] font-black"
+                      :class="i === 0 ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-600'"
+                      x-text="i === 0 ? '1º · el de siempre' : (i + 1) + 'º · alternativa'"></span>
+                <span x-show="cheapest() === i && rows.length > 1" class="px-2 py-0.5 rounded-md text-[11px] font-black bg-amber-100 text-amber-800">💲 más barato</span>
+                <span class="flex-1"></span>
+                <button type="button" @click="move(i, -1)" :disabled="i === 0" title="Subir prioridad" class="w-8 h-8 rounded-lg bg-gray-100 text-sm disabled:opacity-30">▲</button>
+                <button type="button" @click="move(i, 1)" :disabled="i === rows.length - 1" title="Bajar prioridad" class="w-8 h-8 rounded-lg bg-gray-100 text-sm disabled:opacity-30">▼</button>
+                <button type="button" @click="rows.splice(i, 1)" title="Quitar" class="w-8 h-8 rounded-lg text-gray-400 hover:bg-rose-50 hover:text-rose-600">✕</button>
+              </div>
+              <div class="grid grid-cols-6 gap-2">
+                <select name="place" x-model="r.place" class="col-span-4 p-2 border border-gray-300 rounded-lg bg-white text-sm">
+                  <option value="">— Lugar —</option>
+                  {{range .Places}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+                </select>
+                <input name="brand" x-model="r.brand" placeholder="Marca" class="col-span-2 min-w-0 p-2 border border-gray-300 rounded-lg text-sm" />
+
+                <label class="col-span-6 flex items-center gap-2 text-xs font-bold text-gray-700">
+                  <input type="checkbox" x-model="r.byWeight" /> Se vende a granel (precio por kilo)
+                </label>
+                <input type="hidden" name="by_weight" :value="r.byWeight ? '1' : '0'" />
+                <!-- Un campo de cada uno por lugar (aunque esté oculto) para que las listas lleguen alineadas. -->
+                <input name="pack_label" x-model="r.pack" @change="autofill(r, true)" x-show="!r.byWeight"
+                       class="col-span-6 sm:col-span-3 min-w-0 p-2 border border-gray-300 rounded-lg text-sm"
+                       :placeholder="'Presentación aquí (ej. Burbuja 400 g)' + (supplyUnit() ? ' · si no: ' + supplyUnit() : '')" />
+                <div class="col-span-6 sm:col-span-3 flex gap-2" x-show="!r.byWeight">
+                  <input name="content_qty" x-model="r.qty" inputmode="decimal" placeholder="Contenido" title="Cuánto trae la presentación"
+                         class="w-full min-w-0 p-2 border border-gray-300 rounded-lg text-sm" />
+                  <select name="content_unit" x-model="r.unit" class="p-2 border border-gray-300 rounded-lg bg-white text-sm">
+                    {{range .Units}}<option value="{{.}}">{{.}}</option>{{end}}
+                  </select>
+                </div>
+
+                <div class="col-span-6 flex items-center gap-2">
+                  <input name="price" x-model="r.price" inputmode="decimal" :placeholder="r.byWeight ? 'Precio por kg' : 'Precio de la presentación'"
+                         class="w-44 min-w-0 p-2 border border-gray-300 rounded-lg text-sm" />
+                  <span class="text-xs font-bold text-gray-500" x-show="r.byWeight">/ kg</span>
+                  <span class="text-xs text-gray-500" x-show="!r.byWeight && unitLabel(r)" x-text="'= ' + unitLabel(r)"></span>
+                </div>
+                <input name="source_note" x-model="r.note" maxlength="200" class="col-span-6 p-2 border border-gray-300 rounded-lg text-sm"
+                       :placeholder="i === 0 ? 'Por qué aquí (ej. conviene por caja, siempre hay)' : 'Cuándo comprar aquí (ej. solo si no hay en el 1º)'" />
+              </div>
+            </div>
+          </template>
+          <button type="button" @click="add()" class="text-sm font-bold underline">+ Otro lugar</button>
+        </section>
+
+        <section class="bg-white rounded-2xl border border-gray-200 p-4" x-data="{ q: '' }">
+          <h2 class="font-black">Si no hay, sirve…</h2>
+          <p class="text-xs text-gray-500 mb-2">Otros insumos que lo sustituyen.</p>
+          {{if .Others}}
+          <input type="search" x-model="q" placeholder="Buscar…" class="w-full p-2 border border-gray-300 rounded-lg text-sm mb-2" />
+          <div class="max-h-48 overflow-y-auto space-y-1">
+            {{range .Others}}
+            <label data-key="{{searchKey .Name}}" x-show="!q || $el.dataset.key.includes(q.toLowerCase()) || $el.querySelector('input').checked" class="flex items-center gap-2 text-sm">
+              <input type="checkbox" name="substitute" value="{{.ID}}" {{if index $.Subs .ID}}checked{{end}} /> {{.Name}}</label>
+            {{end}}
+          </div>
+          {{else}}<p class="text-xs text-gray-400">Todavía no hay otros insumos.</p>{{end}}
+        </section>
+
+        <button class="w-full py-3 rounded-xl bg-slate-900 text-white font-bold">Guardar</button>
+      </form>
+      <datalist id="cats">{{range .Categories}}<option value="{{.}}">{{end}}</datalist>
+      <datalist id="locs">{{range .Locations}}<option value="{{.}}">{{end}}</datalist>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,36 @@
+{{define "compras_layout"}}<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>{{block "compras_title" .}}Compras{{end}} · Open POS</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    {{devTailwind}}
+    <script src="/static/vendor/htmx-1.9.10.min.js" defer></script>
+    <script defer src="/static/vendor/alpinejs-3.17.4.min.js"></script>
+    <style>[x-cloak]{display:none!important} .htmx-request{opacity:.6}</style>
+  </head>
+  <body class="bg-gray-100 text-slate-900 min-h-screen font-sans antialiased">
+    <header class="bg-slate-900 text-white sticky top-0 z-20 shadow-md">
+      <div class="max-w-3xl mx-auto px-4 h-14 flex items-center gap-3">
+        <a href="/" class="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap">← POS</a>
+        <h1 class="text-base font-black whitespace-nowrap">📝 Compras</h1>
+        <span class="flex-1"></span>
+        <span class="text-xs text-slate-300 truncate">{{.Who.Name}}</span>
+      </div>
+    </header>
+    <main class="max-w-3xl mx-auto px-4 py-4 pb-24">
+      {{template "compras_content" .}}
+    </main>
+    <nav class="fixed bottom-0 inset-x-0 bg-white border-t border-gray-200 pb-[env(safe-area-inset-bottom)] z-20">
+      <div class="max-w-3xl mx-auto grid grid-flow-col auto-cols-fr text-center text-xs font-bold">
+        <a href="/compras" class="py-2.5 {{if eq .Tab "pedir"}}text-emerald-600{{else}}text-gray-500{{end}}"><span class="block text-lg">📝</span>Pedir</a>
+        {{if .Who.CanShop}}<a href="/compras/comprar" class="py-2.5 {{if eq .Tab "comprar"}}text-emerald-600{{else}}text-gray-500{{end}}"><span class="block text-lg">🛍️</span>Comprar</a>{{end}}
+        {{if .Who.CanShop}}<a href="/compras/tickets" class="py-2.5 {{if eq .Tab "tickets"}}text-emerald-600{{else}}text-gray-500{{end}}"><span class="block text-lg">🧾</span>Tickets</a>{{end}}
+        {{if .Who.CanOpen}}<a href="/compras/lista" class="py-2.5 {{if eq .Tab "lista"}}text-emerald-600{{else}}text-gray-500{{end}}"><span class="block text-lg">📋</span>Lista</a>{{end}}
+      </div>
+    </nav>
+  </body>
+</html>{{end}}
+
+{{define "compras_error"}}{{with .}}<p class="bg-rose-50 text-rose-700 text-sm font-semibold rounded-lg px-3 py-2 mb-3">{{.}}</p>{{end}}{{end}}

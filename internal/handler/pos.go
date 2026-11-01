@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
 
 	"github.com/calebpyn/open-pos/internal/domain"
+	"github.com/calebpyn/open-pos/internal/ocr"
 	"github.com/calebpyn/open-pos/internal/plugins"
 )
 
@@ -13,7 +15,11 @@ type POSHandler struct {
 	DB        *sql.DB
 	BackupDir string // carpeta de respaldos de la base
 	Plugins   *plugins.Manager
-	logins    *loginLimiter
+	DataDir   string // carpeta de la base: ahí van las fotos de tickets (compras-tickets/)
+	// OCR lee una foto de ticket; nil = el OCR de macOS (internal/ocr). Las
+	// pruebas lo reemplazan.
+	OCR    func(ctx context.Context, imagePath string) ([]ocr.Box, error)
+	logins *loginLimiter
 }
 
 func NewPOSHandler(db *sql.DB) *POSHandler {

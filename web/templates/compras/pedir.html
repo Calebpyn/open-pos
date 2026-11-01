@@ -1,0 +1,85 @@
+{{template "compras_layout" .}}
+{{define "compras_title"}}Pedir{{end}}
+{{define "compras_content"}}
+<div x-data="{ q: '' }">
+  {{if not .List}}
+  <div class="bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-4 py-3 mb-4 text-sm">
+    <b>No hay lista abierta.</b> {{if .Who.CanOpen}}<a href="/compras/lista" class="underline font-bold">Ábrela aquí</a> para que el equipo anote lo que falta.{{else}}Pídele a caja que la abra para poder anotar lo que falta.{{end}}
+  </div>
+  {{else}}
+  <div class="flex items-baseline justify-between mb-3">
+    <h2 class="text-xl font-black">¿Qué falta?</h2>
+    <span class="text-xs text-gray-500">{{.Count}} en la lista{{if eq .List.Status "SHOPPING"}} · ya están comprando{{end}}</span>
+  </div>
+  {{end}}
+
+  {{if .Carried}}
+  <section class="bg-white border border-rose-200 rounded-xl p-3 mb-4">
+    <h3 class="text-sm font-black text-rose-700">⏳ Pedidos que no se han surtido</h3>
+    <ul class="mt-1 space-y-1 text-sm">
+      {{range .Carried}}
+      <li class="flex justify-between gap-2">
+        <span>{{if .Urgent}}‼️ {{end}}{{.Supply}} <span class="text-gray-400 text-xs">· {{.RequestedBy}}</span></span>
+        <span class="text-xs font-bold text-rose-600 whitespace-nowrap">{{$d := days .FirstRequestedAt}}{{if eq $d 0}}hoy{{else if eq $d 1}}hace 1 día{{else}}hace {{$d}} días{{end}}</span>
+      </li>
+      {{end}}
+    </ul>
+  </section>
+  {{end}}
+
+  <input type="search" x-model="q" placeholder="Buscar insumo…" class="w-full p-3 rounded-xl border border-gray-300 mb-2 sticky top-16 z-10 shadow-sm" />
+  <div class="flex items-center gap-1.5 text-xs mb-4">
+    <span class="font-bold text-gray-500">Ver por</span>
+    <a href="/compras" class="px-2.5 py-1 rounded-lg font-bold {{if eq .By "ubicacion"}}bg-slate-900 text-white{{else}}bg-gray-100 text-gray-600{{end}}">Dónde se guarda</a>
+    <a href="/compras?por=categoria" class="px-2.5 py-1 rounded-lg font-bold {{if eq .By "categoria"}}bg-slate-900 text-white{{else}}bg-gray-100 text-gray-600{{end}}">Categoría</a>
+  </div>
+
+  {{range .Groups}}
+  <section class="mb-5" data-key="{{range .Rows}}{{searchKey .Name}} {{searchKey .Category}}|{{end}}"
+           x-show="!q || $el.dataset.key.includes(q.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim())">
+    <h3 class="text-xs font-black uppercase tracking-wide text-gray-500 mb-2">{{.Name}}</h3>
+    <div class="space-y-2">
+      {{range .Rows}}{{template "compras_row" (args "C" . "List" $.List)}}{{end}}
+    </div>
+  </section>
+  {{else}}
+  <p class="text-sm text-gray-500">Todavía no hay insumos. El administrador los da de alta en Admin → 🛒 Compras.</p>
+  {{end}}
+</div>
+{{end}}
+
+{{define "compras_row"}}{{$c := .C}}{{$mine := $c.Mine}}
+<div id="s-{{$c.ID}}" data-key="{{searchKey $c.Name}} {{searchKey $c.Category}}"
+     x-show="!q || $el.dataset.key.includes(q.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim())"
+     x-data="{ note: false }"
+     class="bg-white rounded-xl border {{if $c.Item}}{{if $c.Item.Urgent}}border-rose-300{{else}}border-amber-300{{end}}{{else}}border-gray-200{{end}} p-3">
+  <div class="flex items-center gap-2">
+    <div class="flex-1 min-w-0">
+      <p class="font-semibold leading-tight">{{$c.Name}}</p>
+      <p class="text-xs text-gray-500 truncate">
+        {{$c.Unit}}
+        {{with $c.Item}}{{if eq .Status "BOUGHT"}}<span class="text-emerald-700 font-bold">· comprado ✓</span>{{else if eq .Status "NOT_FOUND"}}<span class="text-gray-500 font-bold">· no había</span>{{else}}<span class="{{if .Urgent}}text-rose-600{{else}}text-amber-700{{end}} font-bold">· {{if .Urgent}}urge{{else}}falta{{end}}</span> · {{.RequestedBy}}{{end}}{{end}}
+      </p>
+    </div>
+    {{if .List}}
+    <button hx-post="/compras/pedir/{{$c.ID}}" hx-vals='{"urgent": "0"}' hx-target="#s-{{$c.ID}}" hx-swap="outerHTML"
+            class="px-3 py-2 rounded-lg text-sm font-bold {{if and $mine (not $mine.Urgent)}}bg-amber-400 text-amber-950{{else}}bg-gray-100 text-gray-700{{end}}">Falta</button>
+    <button hx-post="/compras/pedir/{{$c.ID}}" hx-vals='{"urgent": "1"}' hx-target="#s-{{$c.ID}}" hx-swap="outerHTML"
+            class="px-3 py-2 rounded-lg text-sm font-bold {{if and $mine $mine.Urgent}}bg-rose-600 text-white{{else}}bg-gray-100 text-gray-700{{end}}">Urge</button>
+    {{end}}
+  </div>
+  {{with $c.Item}}{{range .Notes}}<p class="text-xs text-gray-600 mt-1">💬 {{.}}</p>{{end}}{{end}}
+  {{if $mine}}
+  <div class="flex gap-3 mt-2 text-xs font-bold">
+    <button type="button" @click="note = !note" class="text-gray-600 underline">{{if $mine.Note}}Cambiar nota{{else}}Agregar nota{{end}}</button>
+    <button hx-post="/compras/pedir/{{$c.ID}}/quitar" hx-target="#s-{{$c.ID}}" hx-swap="outerHTML" class="text-gray-400 underline">Quitar mi pedido</button>
+  </div>
+  <form x-cloak x-show="note" hx-post="/compras/pedir/{{$c.ID}}" hx-target="#s-{{$c.ID}}" hx-swap="outerHTML" class="flex gap-2 mt-2">
+    <input type="hidden" name="urgent" value="{{if $mine.Urgent}}1{{else}}0{{end}}" />
+    <input name="note" value="{{$mine.Note}}" maxlength="300" placeholder="Ej. 2 bolsas, la de sin lactosa" class="flex-1 min-w-0 p-2 text-sm border border-gray-300 rounded-lg" />
+    <button class="px-3 rounded-lg bg-slate-900 text-white text-sm font-bold">OK</button>
+  </form>
+  {{end}}
+  {{with .Error}}<p class="text-xs font-semibold text-rose-600 mt-1">{{.}}</p>{{end}}
+</div>
+{{end}}

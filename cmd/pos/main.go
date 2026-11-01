@@ -74,6 +74,7 @@ func main() {
 	}()
 	database.AfterBackup = func(ctx context.Context, dir, stamp string, keep int) {
 		pluginMgr.Backup(ctx, dir, stamp, keep)
+		handler.BackupTicketImages(dataDir, dir) // fotos de tickets de Compras
 	}
 
 	// Respaldo diario automático junto a la base (POS_BACKUP_DIR para otra carpeta).
@@ -93,6 +94,7 @@ func main() {
 	posHandler := handler.NewPOSHandler(db)
 	posHandler.BackupDir = backupDir
 	posHandler.Plugins = pluginMgr
+	posHandler.DataDir = dataDir
 	if err := pluginMgr.Start(ctx); err != nil {
 		log.Printf("Los plugins no se cargaron: %v", err)
 	}
@@ -226,6 +228,9 @@ func main() {
 
 	// Plugins: su API, su administración y sus páginas en el panel
 	posHandler.RegisterPluginRoutes(mux)
+
+	// Compras: la lista de compras del negocio
+	posHandler.RegisterComprasRoutes(mux)
 
 	// Archivos estáticos (van dentro del ejecutable)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(web.Static())))

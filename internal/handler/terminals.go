@@ -86,10 +86,16 @@ func routes(method string, patterns ...string) []route {
 var waiterAllowed = append(append(
 	routes("GET", `/`, `/static/.*`, `/favicon\.ico`, `/api/terminal/me`,
 		`/api/menu/tree`, `/api/menu/modifiers`, `/api/tables`, `/api/tables/floor`, `/api/tables/\d+/guests`,
-		`/api/expo/html`),
+		`/api/expo/html`,
+		// Compras: cada pantalla revisa además si la persona puede surtir o
+		// abrir listas.
+		`/compras`, `/compras/(comprar|lista|lista/texto|tickets)`, `/compras/tickets/\d+(/imagen)?`),
 	routes("POST", `/api/terminal/login`, `/api/terminal/logout`,
 		`/api/orders/add`, `/api/order-items/\d+/(deliver|undeliver)`,
-		`/api/orders/\d+/(deliver|reprint|prebill)`)...),
+		`/api/orders/\d+/(deliver|reprint|prebill)`,
+		`/compras/pedir/\d+(/quitar)?`, `/compras/comprar/\d+/(comprado|no-habia|pendiente|cantidad)`,
+		`/compras/lista/(abrir|a-compras|cerrar)`,
+		`/compras/tickets`, `/compras/tickets/\d+/(confirmar|descartar)`)...),
 	routes("HEAD", `/`, `/static/.*`)...)
 
 // Acceso remoto por Tailscale (direcciones 100.64.0.0/10 y fd7a:115c:a1e0::/48):
@@ -154,7 +160,7 @@ func (h *POSHandler) TerminalGuard(next http.Handler) http.Handler {
 		if isTailscale(r) {
 			ctx := context.WithValue(r.Context(), ctxTerminal, Terminal{Kind: TerminalRemote, Name: "Admin remoto"})
 			switch {
-			// Las páginas del panel (plugins) piden sesión de admin.
+			// Las páginas del panel (Compras, plugins) piden sesión de admin.
 			case matches(remoteAllowed, r) || (r.Method != http.MethodGet &&
 				(strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, "/admin/"))):
 				next.ServeHTTP(w, r.WithContext(ctx))
@@ -184,6 +190,11 @@ func (h *POSHandler) TerminalGuard(next http.Handler) http.Handler {
 			return
 		}
 		if t.UserID == 0 && !matches(waiterPublic, r) {
+			// Una página (p. ej. /compras) manda a la pantalla del PIN.
+			if r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/") {
+				http.Redirect(w, r, "/", http.StatusSeeOther)
+				return
+			}
 			http.Error(w, "Inicia sesión con tu PIN.", http.StatusUnauthorized)
 			return
 		}

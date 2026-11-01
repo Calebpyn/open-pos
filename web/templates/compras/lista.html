@@ -1,0 +1,75 @@
+{{template "compras_layout" .}}
+{{define "compras_title"}}Lista{{end}}
+{{define "compras_content"}}
+{{template "compras_error" .Error}}
+{{with .List}}
+<section class="bg-white rounded-2xl border border-gray-200 p-4 mb-4">
+  <div class="flex items-start justify-between gap-3">
+    <div>
+      <p class="text-xs text-gray-500">Abierta {{ago .OpenedAt}} por {{.OpenedBy}}</p>
+      <h2 class="text-xl font-black">Lista de compras</h2>
+    </div>
+    <span class="px-2.5 py-1 rounded-lg text-xs font-black {{if eq .Status "OPEN"}}bg-amber-100 text-amber-800{{else}}bg-sky-100 text-sky-800{{end}}">{{.StatusLabel}}</span>
+  </div>
+  {{with $.Totals}}
+  <dl class="grid grid-cols-4 gap-2 mt-4 text-center">
+    <div><dt class="text-[11px] text-gray-500">Pedidos</dt><dd class="text-lg font-black">{{.Items}}</dd></div>
+    <div><dt class="text-[11px] text-gray-500">Urgen</dt><dd class="text-lg font-black text-rose-600">{{.Urgent}}</dd></div>
+    <div><dt class="text-[11px] text-gray-500">Comprados</dt><dd class="text-lg font-black text-emerald-600">{{.Bought}}</dd></div>
+    <div><dt class="text-[11px] text-gray-500">Estimado</dt><dd class="text-sm font-black mt-1">{{cents .EstimateCents}}</dd></div>
+  </dl>
+  {{end}}
+  <div class="flex gap-2 mt-4">
+    {{if eq .Status "OPEN"}}
+    <form method="post" action="/compras/lista/a-compras" class="flex-1"><button class="w-full py-2.5 rounded-xl bg-slate-900 text-white text-sm font-bold">Mandar a compras</button></form>
+    {{else}}
+    <a href="/compras/comprar" class="flex-1 text-center py-2.5 rounded-xl bg-slate-900 text-white text-sm font-bold">Ver compras</a>
+    {{end}}
+    <form method="post" action="/compras/lista/cerrar" class="flex-1" onsubmit="return confirm('¿Cerrar la lista? Lo que no se compró pasa a la siguiente.')">
+      <button class="w-full py-2.5 rounded-xl bg-gray-100 text-sm font-bold">Cerrar lista</button></form>
+  </div>
+  <p class="text-xs text-gray-500 mt-2">{{if eq .Status "OPEN"}}El equipo está anotando. Cuando esté completa, mándala a compras.{{else}}Ya se está comprando; todavía se puede agregar algo urgente.{{end}}</p>
+</section>
+
+<section class="mb-6">
+  <h3 class="text-xs font-black uppercase tracking-wide text-gray-500 mb-2">En la lista</h3>
+  <div class="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
+    {{range $.Items}}
+    <div class="px-4 py-2.5 flex items-center gap-3 text-sm">
+      <span class="w-5 text-center">{{if eq .Status "BOUGHT"}}✅{{else if eq .Status "NOT_FOUND"}}✕{{else if .Urgent}}‼️{{else}}•{{end}}</span>
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold truncate">{{.Supply}}{{with .QtyLabel}} {{.}}{{end}}</p>
+        <p class="text-xs text-gray-500 truncate">{{.RequestedBy}}{{if .Carried}} · pendiente desde {{ago .FirstRequestedAt}}{{end}}</p>
+      </div>
+      {{if .HasEstimate}}<span class="text-xs text-gray-500">~{{cents .EstimateCents}}</span>{{end}}
+    </div>
+    {{else}}
+    <p class="px-4 py-6 text-sm text-gray-500 text-center">Nadie ha pedido nada todavía.</p>
+    {{end}}
+  </div>
+</section>
+{{else}}
+<section class="bg-white rounded-2xl border border-gray-200 p-6 mb-6 text-center">
+  <h2 class="text-xl font-black mb-1">No hay lista abierta</h2>
+  <p class="text-sm text-gray-500 mb-4">Ábrela para que el equipo anote lo que falta. Lo que no se compró la vez pasada entra solo.</p>
+  <form method="post" action="/compras/lista/abrir"><button class="px-6 py-3 rounded-xl bg-emerald-500 text-slate-950 font-black">Abrir lista</button></form>
+</section>
+{{end}}
+
+{{if .History}}
+<section>
+  <h3 class="text-xs font-black uppercase tracking-wide text-gray-500 mb-2">Listas anteriores</h3>
+  <div class="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
+    {{range .History}}
+    <div class="px-4 py-2.5 flex items-center justify-between text-sm">
+      <div>
+        <p class="font-semibold">{{.OpenedAt}}</p>
+        <p class="text-xs text-gray-500">{{.Items}} pedidos · {{.Bought}} comprados{{if .NotFound}} · {{.NotFound}} no había{{end}}</p>
+      </div>
+      <span class="font-bold">{{cents .SpentCents}}</span>
+    </div>
+    {{end}}
+  </div>
+</section>
+{{end}}
+{{end}}
